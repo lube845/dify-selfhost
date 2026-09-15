@@ -1,0 +1,54 @@
+# Exclude docker compose volumes and runtime data
+docker/volumes
+docker/.env
+
+# Build artifacts
+**/node_modules
+**/.next
+**/dist
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# CI / dev tooling
+.devcontainer
+.github
+.codecov
+.codex
+.gemini
+.claude
+.agents
+coverage
+**/coverage
+
+# Editor
+.vscode
+.idea
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+**/*.log
+
+# Docs / assets not needed at runtime
+docs
+images
+LICENSE
+README.md
+AGENTS.md
+CLAUDE.md
+AUTHORS
+CONTRIBUTING.md
+codecov.yml
+depot.json
+.editorconfig
+eslint.config.mjs
+eslint-suppressions.json

@@ -50,6 +50,7 @@ const PermissionsTable = () => {
     { key: 'appId', label: t('permissions.columns.appId', { ns: 'common' }) },
     { key: 'policy', label: t('permissions.columns.defaultAccess', { ns: 'common' }) },
     { key: 'anonymous', label: t('permissions.columns.allowAnonymous', { ns: 'common' }) },
+    { key: 'whitelist', label: t('permissions.columns.whitelist', { ns: 'common' }) },
   ]), [t])
 
   if (isPending) {
@@ -115,25 +116,16 @@ const PermissionsTable = () => {
                     </Tooltip>
                   </td>
                   <td className="px-6 py-4">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <Switch
-                          checked={isAllowAll}
-                          onCheckedChange={() => handleToggle(app.id, app.access_policy)}
-                        />
-                        <span className="system-sm-regular text-text-secondary">
-                          {isAllowAll
-                            ? t('permissions.defaultAccess.allowAll', { ns: 'common' })
-                            : t('permissions.defaultAccess.denyAllExplicit', { ns: 'common' })}
-                        </span>
-                      </div>
-                      <Button
-                        variant="secondary"
-                        size="small"
-                        onClick={() => setSelectedApp({ id: app.id, name: app.name })}
-                      >
-                        {t('permissions.whitelist', { ns: 'common' })}
-                      </Button>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={isAllowAll}
+                        onCheckedChange={() => handleToggle(app.id, app.access_policy)}
+                      />
+                      <span className="system-sm-regular text-text-secondary">
+                        {isAllowAll
+                          ? t('permissions.defaultAccess.allowAll', { ns: 'common' })
+                          : t('permissions.defaultAccess.denyAllExplicit', { ns: 'common' })}
+                      </span>
                     </div>
                   </td>
                   <td className="px-6 py-4">
@@ -164,6 +156,15 @@ const PermissionsTable = () => {
                             </Tooltip>
                           )}
                     </div>
+                  </td>
+                  <td className="px-6 py-4">
+                    <Button
+                      variant="secondary"
+                      size="small"
+                      onClick={() => setSelectedApp({ id: app.id, name: app.name })}
+                    >
+                      {t('permissions.whitelist', { ns: 'common' })}
+                    </Button>
                   </td>
                 </tr>
               )

@@ -16,6 +16,7 @@ const EMBEDDABLE_ROUTE_PREFIXES = [
   '/webapp-signin',
   '/webapp-no-permission',
   '/webapp-permission-expired',
+  '/webapp-logged-out',
   '/oa-login',
 ] as const
 

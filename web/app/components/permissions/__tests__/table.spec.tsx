@@ -80,7 +80,17 @@ describe('PermissionsTable', () => {
     expect(screen.getByText('common.permissions.columns.appId')).toBeInTheDocument()
     expect(screen.getByText('common.permissions.columns.defaultAccess')).toBeInTheDocument()
     expect(screen.getByText('common.permissions.columns.allowAnonymous')).toBeInTheDocument()
+    expect(screen.getByText('common.permissions.columns.whitelist')).toBeInTheDocument()
     expect(screen.getAllByText('common.permissions.defaultAccess.allowAll').length).toBeGreaterThan(0)
+
+    const headerLabels = screen.getAllByRole('columnheader').map(th => th.textContent)
+    expect(headerLabels).toEqual([
+      'common.permissions.columns.appName',
+      'common.permissions.columns.appId',
+      'common.permissions.columns.defaultAccess',
+      'common.permissions.columns.allowAnonymous',
+      'common.permissions.columns.whitelist',
+    ])
     expect(screen.getAllByText('common.permissions.defaultAccess.denyAllExplicit').length).toBeGreaterThan(0)
   })
 

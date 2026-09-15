@@ -20,7 +20,25 @@ import { useRouter } from '@/next/navigation'
 import { useOASession } from '@/service/oa-session'
 import { webAppLogout } from '@/service/webapp-auth'
 
-/** Where an OA visitor lands after signing out. */
+/**
+ * Where an OA visitor lands after signing out.
+ *
+ * Two distinct destinations are needed because the two "sign-out"
+ * triggers are different user intents:
+ *
+ *   - `LOGGED_OUT_PATH` (this one) — the explicit sign-out click. The
+ *     visitor asked to leave, so we hand them to a read-only
+ *     confirmation page. They have to navigate to a `/chat/<token>`
+ *     URL again to start a new session.
+ *
+ *   - `OA_LOGIN_PATH` — the 8-hour proactive-expiry timer further down
+ *     in this file. The visitor did NOT click sign out; their cookie
+ *     silently lapsed while the tab was open. Going through the
+ *     confirmation page there would be misleading ("Account X has been
+ *     signed out" when they never asked), so we keep the direct route
+ *     to the login form for that case.
+ */
+const LOGGED_OUT_PATH = '/webapp-logged-out'
 const OA_LOGIN_PATH = '/oa-login'
 
 /**
@@ -63,6 +81,15 @@ const OAUserInfo: FC = () => {
   const handleLogout = useCallback(async () => {
     setOpen(false)
     setLoggingOut(true)
+    // Capture the displayable identity BEFORE `webAppLogout` runs — the
+    // call clears `oa_session` and the local passport, but the in-memory
+    // `session` from `useOASession` is still authoritative here.
+    //
+    // `session?.` defends against the race where the cookie has already
+    // lapsed (or a fetch errored) between the render that exposed the
+    // button and the click. Falling back to an empty string hands the
+    // visitor to the page's generic copy instead of throwing.
+    const account = session?.name || session?.workcode || ''
     try {
       // Clears the `oa_session` cookie *and* the webapp passport / access token
       // cached in localStorage, so the next visitor on this browser cannot
@@ -74,8 +101,11 @@ const OAUserInfo: FC = () => {
       // A failed sign-out must not strand the visitor on the chat page —
       // navigating away is the whole point of the button.
     }
-    router.replace(OA_LOGIN_PATH)
-  }, [router, shareCode])
+    const target = account
+      ? `${LOGGED_OUT_PATH}?account=${encodeURIComponent(account)}`
+      : LOGGED_OUT_PATH
+    router.replace(target)
+  }, [router, session, shareCode])
 
   const expiresAtIso = session?.expires_at ?? null
 

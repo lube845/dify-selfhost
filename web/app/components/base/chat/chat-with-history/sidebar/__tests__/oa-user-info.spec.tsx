@@ -138,14 +138,20 @@ describe('OAUserInfo', () => {
   })
 
   describe('Sign-out', () => {
-    it('should clear the session and return to the login page', async () => {
+    // The explicit sign-out click lands on the standalone signed-out
+    // confirmation page (account name URL-encoded in `?account=`) rather
+    // than straight back on the login form — see
+    // `web/app/webapp-logged-out/page.tsx`. The proactive 8h expiry
+    // timer further down keeps the old behaviour; only the click path
+    // is affected here.
+    it('should clear the session and route to the signed-out page', async () => {
       const user = userEvent.setup()
       renderWithSession(signedInSession)
 
       await user.click(screen.getByRole('button', { name: 'common.oaUser.logout' }))
 
       await waitFor(() => expect(webAppLogout).toHaveBeenCalledWith('app-code-1'))
-      expect(mockReplace).toHaveBeenCalledWith('/oa-login')
+      expect(mockReplace).toHaveBeenCalledWith('/webapp-logged-out?account=Zhang%20San')
     })
 
     it('should sign out from the dropdown item as well', async () => {
@@ -156,17 +162,17 @@ describe('OAUserInfo', () => {
       await user.click(await screen.findByRole('menuitem'))
 
       await waitFor(() => expect(webAppLogout).toHaveBeenCalledWith('app-code-1'))
-      expect(mockReplace).toHaveBeenCalledWith('/oa-login')
+      expect(mockReplace).toHaveBeenCalledWith('/webapp-logged-out?account=Zhang%20San')
     })
 
-    it('should still reach the login page when the backend logout fails', async () => {
+    it('should still reach the signed-out page when the backend logout fails', async () => {
       const user = userEvent.setup()
       vi.mocked(webAppLogout).mockRejectedValueOnce(new Error('offline'))
       renderWithSession(signedInSession)
 
       await user.click(screen.getByRole('button', { name: 'common.oaUser.logout' }))
 
-      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/oa-login'))
+      await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/webapp-logged-out?account=Zhang%20San'))
     })
   })
 
