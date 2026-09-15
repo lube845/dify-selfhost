@@ -179,6 +179,28 @@ function requiredWebSSOLogin(message?: string, code?: number) {
   globalThis.location.href = `${globalThis.location.origin}${basePath}${WBB_APP_LOGIN_PATH}?${params.toString()}`
 }
 
+const OA_LOGIN_PATH = '/oa-login'
+
+/**
+ * Send the visitor to the OA sign-in page, carrying the current webapp URL so
+ * they land back where they were after signing in.
+ *
+ * Triggered by the backend's ``web_app_login_required``: the app's owner turned
+ * anonymous access off (or made the app allowlist-only) and this request has no
+ * signed-in identity. Different from ``requiredWebSSOLogin``: that one belongs
+ * to the enterprise SSO channel (``/webapp-signin``) and cannot recover the OA
+ * case, because the OA session is a separate cookie.
+ */
+function requiredOALogin() {
+  // prevent redirect loop
+  if (globalThis.location.pathname === OA_LOGIN_PATH)
+    return
+
+  const params = new URLSearchParams()
+  params.append('redirect_url', encodeURIComponent(`${globalThis.location.pathname}${globalThis.location.search}`))
+  globalThis.location.href = `${globalThis.location.origin}${basePath}${OA_LOGIN_PATH}?${params.toString()}`
+}
+
 /**
  * Show a localised toast for an API error response.
  *
@@ -189,6 +211,10 @@ function requiredWebSSOLogin(message?: string, code?: number) {
 function showApiErrorToast(data?: { code?: string, message?: string }) {
   if (data?.code === 'app_access_permission_denied') {
     toast.error(t('webapp.accessDenied', { ns: 'common' }))
+    return
+  }
+  if (data?.code === 'web_app_permission_expired') {
+    toast.error(t('webapp.authExpired', { ns: 'common' }))
     return
   }
   toast.error(data?.message || 'Server Error')
@@ -547,6 +573,14 @@ export const ssePost = async (
                 if (data.code === 'web_sso_auth_required')
                   requiredWebSSOLogin()
 
+                // App-level anonymous policy — recoverable by signing in.
+                if (data.code === 'web_app_login_required')
+                  requiredOALogin()
+
+                // Allowlist row lapsed — terminal until an admin renews it.
+                if (data.code === 'web_app_permission_expired')
+                  jumpTo(`${globalThis.location.origin}${basePath}/webapp-permission-expired`)
+
                 if (data.code === 'unauthorized')
                   requiredWebSSOLogin()
               }
@@ -694,6 +728,14 @@ export const sseGet = async (
                 if (data.code === 'web_sso_auth_required')
                   requiredWebSSOLogin()
 
+                // App-level anonymous policy — recoverable by signing in.
+                if (data.code === 'web_app_login_required')
+                  requiredOALogin()
+
+                // Allowlist row lapsed — terminal until an admin renews it.
+                if (data.code === 'web_app_permission_expired')
+                  jumpTo(`${globalThis.location.origin}${basePath}/webapp-permission-expired`)
+
                 if (data.code === 'unauthorized')
                   requiredWebSSOLogin()
               }
@@ -786,14 +828,41 @@ export const request = async<T>(url: string, options = {}, otherOptions?: IOther
         return Promise.reject(errRespData)
       // special code
       const { code, message } = errRespData
-      // webapp sso
-      if (code === 'web_app_access_denied') {
-        requiredWebSSOLogin(message, 403)
+      // Per-app anonymous policy: the app does not accept anonymous visitors
+      // and this request carries no signed-in identity. Checked before the
+      // refresh-token fallback below, which would otherwise bounce the
+      // visitor to the console /signin page.
+      if (code === 'web_app_login_required') {
+        requiredOALogin()
         return Promise.reject(err)
       }
-      if (code === 'web_sso_auth_required') {
-        requiredWebSSOLogin()
+      // Per-app allowlist row lapsed: this user *was* granted access and an
+      // admin has to renew it, so send them to the dedicated page. Must be
+      // handled before the refresh-token fallback at the bottom of this block,
+      // which would otherwise bounce a webapp visitor to the console /signin
+      // page — a screen with no relationship to their app.
+      if (code === 'web_app_permission_expired') {
+        jumpTo(`${globalThis.location.origin}${basePath}/webapp-permission-expired`)
         return Promise.reject(err)
+      }
+      // webapp sso — but only redirect to /webapp-signin when the visitor
+      // has NOT signed in via OA. The OA flow (oa_session cookie) is a
+      // separate authentication channel; if it's present, the
+      // per-app allowlist or expired-row UI on /webapp-no-permission /
+      // /webapp-permission-expired should handle the rejection instead of
+      // dropping the visitor onto the legacy SSO login page (which has no
+      // UX for the OA case and renders "应用不可用").
+      const isOASession = typeof document !== 'undefined'
+        && document.cookie.split('; ').some(c => c.startsWith('oa_session='))
+      if (!isOASession) {
+        if (code === 'web_app_access_denied') {
+          requiredWebSSOLogin(message, 403)
+          return Promise.reject(err)
+        }
+        if (code === 'web_sso_auth_required') {
+          requiredWebSSOLogin()
+          return Promise.reject(err)
+        }
       }
       if (code === 'unauthorized_and_force_logout') {
         // Cookies will be cleared by the backend
@@ -837,8 +906,17 @@ export const request = async<T>(url: string, options = {}, otherOptions?: IOther
     }
     else if (errResp.status === 403) {
       // AppAccessPermissionDeniedError: 403 + code=app_access_permission_denied.
-      // Authenticated, but app policy denies this user. Show a localised toast.
+      // Raised only by the public webapp gate (api/controllers/web/wraps.py),
+      // never by the console API, so the visitor is on a /chat/<code> page:
+      // route them to the dedicated screen. A toast alone would leave them on
+      // a broken chat page, and — because the webapp queries are all `silent` —
+      // it would not even be shown.
       const [, errRespData] = await asyncRunSafe<ResponseError>(errResp.json())
+      const errCode = (errRespData as { code?: string } | undefined)?.code
+      if (errCode === 'app_access_permission_denied') {
+        jumpTo(`${globalThis.location.origin}${basePath}/webapp-no-permission`)
+        return Promise.reject(err)
+      }
       if (!silent)
         showApiErrorToast(errRespData as { code?: string, message?: string })
       return Promise.reject(err)

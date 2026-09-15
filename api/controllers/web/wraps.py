@@ -14,6 +14,7 @@ from controllers.web.error import (
     AppAccessPermissionDeniedError,
     WebAppAuthAccessDeniedError,
     WebAppAuthRequiredError,
+    WebAppLoginRequiredError,
     WebAppPermissionExpiredError,
 )
 from extensions.ext_database import db
@@ -124,6 +125,42 @@ def _validate_webapp_token(decoded, app_web_auth_enabled: bool, system_webapp_au
             raise Unauthorized("webapp token expired.")
 
 
+def _is_signed_in_end_user(end_user: EndUser, *, system_webapp_auth_enabled: bool) -> bool:
+    """True when the webapp request carries a live signed-in identity.
+
+    The ``oa_session`` cookie is the **liveness** signal for the OA flow: its
+    ``OA_SESSION_EXPIRE_HOURS`` window (8h by default) is what makes "re-login
+    every 8 hours" enforceable. The ``EndUser`` row is deliberately NOT trusted
+    on its own — ``_is_anonymous`` is flipped to False on the first OA login and
+    never restored, so a visitor could otherwise keep chatting indefinitely on a
+    passport cached in localStorage long after the cookie lapsed. That is the
+    difference between "this browser is someone we know" (a permanent row
+    attribute) and "this browser is signed in right now" (the cookie).
+
+    (``_is_anonymous`` is the mapped column — the ``is_anonymous`` property on
+    the model is overridden to always report False, so it cannot be used for
+    this decision.)
+
+    The enterprise edition is the exception: with ``webapp_auth`` enabled the
+    identity arrives as an SSO / email-code token instead of a cookie, and those
+    end_users are minted with ``is_anonymous=False`` and never receive an
+    ``oa_session``. A non-anonymous row is therefore still honoured, but only
+    while that feature is driving identity — so community-edition behaviour is
+    unaffected by this clause.
+
+    The enterprise SSO flow that does set ``is_anonymous=True`` is covered by
+    the caller's own ``enterprise_identity`` flag, which it ORs with this result.
+    """
+    # Lazy import: ``controllers.web.oa_auth`` imports ``controllers.web``,
+    # which imports this module.
+    from controllers.web.oa_auth import is_oa_authenticated
+
+    if is_oa_authenticated():
+        return True
+
+    return system_webapp_auth_enabled and not end_user._is_anonymous
+
+
 def _validate_user_accessibility(
     decoded,
     app_code,
@@ -168,14 +205,38 @@ def _validate_user_accessibility(
             if granted_at and datetime.fromtimestamp(granted_at, tz=UTC) < last_update_time:
                 raise WebAppAuthRequiredError("SSO settings have been updated. Please re-login.")
 
+    # Per-app anonymous policy. Kept ahead of the allowlist check because the
+    # two failure modes have different remedies: "you are not signed in" is
+    # self-service (go to /oa-login), "you are not on the allowlist" needs an
+    # admin.
+    #
+    # While the enterprise webapp-auth flow is in charge the identity comes
+    # from the SSO token instead of an ``oa_session`` cookie, and its end_users
+    # are rows created with ``is_anonymous=True``; treat them as signed in so
+    # the policy neither locks them out nor changes their allowlist behaviour.
+    enterprise_identity = system_webapp_auth_enabled and app_web_auth_enabled
+    signed_in = enterprise_identity or _is_signed_in_end_user(
+        end_user,
+        system_webapp_auth_enabled=system_webapp_auth_enabled,
+    )
+
+    if AppAccessPermissionService.requires_login(app=app_model) and not signed_in:
+        raise WebAppLoginRequiredError()
+
     # Per-app explicit allowlist (independent of the enterprise webapp-auth flow above).
     # Distinguishing EXPIRED from DENIED lets the webapp gate tell the user
     # "your permission has expired, contact admin to renew" rather than the
     # generic "you are not authorised" — the latter is wrong for users who
     # *were* granted access and whose row just lapsed.
-    result = AppAccessPermissionService.check_access_with_reason(app=app_model, end_user=end_user)
+    result = AppAccessPermissionService.check_access_with_reason(
+        app=app_model,
+        end_user=end_user,
+        authenticated=signed_in,
+    )
     if result == AccessCheckResult.EXPIRED:
         raise WebAppPermissionExpiredError()
+    if result == AccessCheckResult.AUTH_REQUIRED:
+        raise WebAppLoginRequiredError()
     if result != AccessCheckResult.ALLOWED:
         raise AppAccessPermissionDeniedError()
 

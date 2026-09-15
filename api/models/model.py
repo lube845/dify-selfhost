@@ -416,6 +416,17 @@ class App(Base):
     access_policy: Mapped[str] = mapped_column(
         sa.String(32), nullable=False, server_default=sa.text("'allow_all'")
     )
+    # Whether a visitor *without* a signed-in OA session may use the app's
+    # webapp. ``True`` (default) preserves the historical anonymous behaviour:
+    # the passport endpoint mints an end_user with a random ``session_id``.
+    # ``False`` forces the visitor through ``/oa-login`` before any webapp
+    # endpoint answers.
+    # Only has an effect while ``access_policy == 'allow_all'``: under
+    # ``deny_all_explicit`` the visitor must sign in *and* hold an
+    # ``AppAccessPermission`` row, so anonymous access is already impossible.
+    allow_anonymous: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, server_default=sa.text("true"), default=True
+    )
     tracing = mapped_column(LongText, nullable=True)
     max_active_requests: Mapped[int | None]
     created_by = mapped_column(StringUUID, nullable=True)

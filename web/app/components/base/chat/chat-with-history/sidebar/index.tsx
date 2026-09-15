@@ -29,6 +29,7 @@ import DifyLogo from '@/app/components/base/logo/dify-logo'
 import MenuDropdown from '@/app/components/share/text-generation/menu-dropdown'
 import { systemFeaturesQueryOptions } from '@/service/system-features'
 import { useChatWithHistoryContext } from '../context'
+import OAUserInfo from './oa-user-info'
 
 type Props = {
   isPanel?: boolean
@@ -151,6 +152,10 @@ const Sidebar = ({ isPanel, panelVisible }: Props) => {
           />
         )}
       </div>
+      {/* Bottom-left of the chat: the signed-in OA visitor and their
+          sign-out. Renders nothing for anonymous visitors
+          (App.allow_anonymous) and for installed apps. */}
+      <OAUserInfo />
       <div className="flex shrink-0 items-center justify-between p-3">
         <MenuDropdown
           hideLogout={isInstalledApp}

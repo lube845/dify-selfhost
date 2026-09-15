@@ -1,0 +1,153 @@
+# ==================================================================
+# Dev compose for Dify — middleware + API + Web with hot reload.
+#
+# **Strategy**: reuse the already-built production images
+# (`dify-api-lube:20260808` / `dify-web-lube:20260808`) as the base and
+# override the entrypoint / CMD + bind-mount the source tree for hot
+# reload. This avoids rebuilding all Python deps from scratch — that
+# step is slow and fragile when run inside Docker.
+#
+# Hot reload behaviour:
+#   - api  : `flask run --debug` (Werkzeug file watcher auto-restarts)
+#   - web  : `next dev`            (Turbopack HMR)
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yaml up -d
+#   # open http://localhost:3000
+# ==================================================================
+
+include:
+  - path: ./docker-compose.middleware.yaml
+    env_file: ./middleware.env
+
+services:
+  # ------------------------------------------------------------------
+  # API service — reuses the prod image, overrides the entrypoint
+  # with `flask run --debug`. The source is bind-mounted so Werkzeug
+  # auto-reloads on .py changes.
+  # ------------------------------------------------------------------
+  api:
+    profiles: [dev]
+    image: dify-api-lube:20260808
+    container_name: dify-api-dev
+    # Override the prod entrypoint — skip the gunicorn path entirely
+    # and launch Flask's dev server with Werkzeug's file watcher.
+    entrypoint: ["flask"]
+    command:
+      - run
+      - --host=0.0.0.0
+      - --port=5001
+      - --debug
+    env_file:
+      # Load middleware defaults first, then the user's full .env so any
+      # vars the user already set there (DB_HOST, DB_TYPE, REDIS_HOST, ...)
+      # take precedence over the middleware.example defaults.
+      - ./middleware.env
+      - ./.env
+    environment:
+      # Make sure Flask picks up the right app and dev mode
+      FLASK_APP: app.py
+      FLASK_DEBUG: "true"
+      PYTHONUNBUFFERED: "1"
+
+      # Network / ports
+      DIFY_BIND_ADDRESS: 0.0.0.0
+      DIFY_PORT: "5001"
+
+      # Service hostnames (match middleware service names).
+      # DB_HOST/DB_TYPE/REDIS_HOST come from the user's .env via env_file.
+      WEAVIATE_ENDPOINT: http://weaviate:8080
+      SANDBOX_API_KEY: dify-sandbox
+      CODE_EXECUTION_ENDPOINT: http://sandbox:8194
+
+      # Plugin daemon points at the dev api container
+      PLUGIN_DIFY_INNER_API_URL: http://api:5001
+
+      # Dev-friendly defaults
+      SECRET_KEY: dev-secret-key-not-for-production
+      MIGRATION_ENABLED: "true"
+      LOG_LEVEL: INFO
+    volumes:
+      # Source code bind mounts — hot reload triggers on change
+      - ../api:/app/api
+      - ../dify-agent:/app/dify-agent
+      # Storage kept on a named volume so migrations / uploads persist
+      - api-storage:/app/api/storage
+    ports:
+      - "5001:5001"
+    depends_on:
+      db_postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_started
+    networks:
+      - default
+      - ssrf_proxy_network
+
+  # ------------------------------------------------------------------
+  # Web service — reuses the prod image's built artifacts for
+  # packages/, but starts `next dev` for HMR. Build artifacts (node_modules,
+  # .next) are anonymous volumes so they survive container restarts.
+  # ------------------------------------------------------------------
+  web:
+    profiles: [dev]
+    image: dify-web-lube:20260808
+    container_name: dify-web-dev
+    # Run as root — the bind-mounted source tree is owned by the host
+    # user, and pnpm writes temp files to /app (the workspace root).
+    # The prod image's `dify` user can't write there.
+    user: "0:0"
+    # Skip the prod entrypoint (which does migrations + next start) and
+    # launch `next dev` directly. Turbopack HMR picks up file edits.
+    #
+    # We also install git first because pnpm's "deps status check" runs
+    # prepare scripts on every container start, and the workspace
+    # `vite-plus` package's prepare script (`vp config`) requires git.
+    # The alpine image used by the prod build doesn't include it.
+    entrypoint: ["sh", "-c"]
+    command:
+      - "apk add --no-cache git python3 py3-pip 2>/dev/null || true
+      && exec pnpm run dev"
+    working_dir: /app/web
+    environment:
+      NEXT_PUBLIC_DEPLOY_ENV: DEVELOPMENT
+      NEXT_PUBLIC_EDITION: SELF_HOSTED
+      NEXT_PUBLIC_API_PREFIX: http://localhost:5001/console/api
+      NEXT_PUBLIC_PUBLIC_API_PREFIX: http://localhost:5001/api
+      NEXT_PUBLIC_SOCKET_URL: ws://localhost:5001
+      NEXT_PUBLIC_BASE_PATH: ""
+      NEXT_TELEMETRY_DISABLED: "1"
+      # Make Next.js bind 0.0.0.0 inside the container
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      # Tell Next to allow our origin (in case of CSRF/CORS checks)
+      NEXT_ALLOWED_DEV_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      # npmmirror — 10x faster than registry.npmjs.org from China
+      COREPACK_REGISTRY: https://registry.npmmirror.com/
+      npm_config_registry: https://registry.npmmirror.com/
+      pnpm_config_registry: https://registry.npmmirror.com/
+      # Skip lifecycle scripts (`prepare`, `postinstall`, ...) — the prod
+      # image already ran them once when it was built. Re-running them on
+      # every container start requires git / python which aren't in the
+      # slim web image, and just slows down startup.
+      npm_config_ignore_scripts: "true"
+    volumes:
+      # Source tree for HMR to detect changes. We bind-mount web/ over
+      # the image's /app/web — node_modules inside the image is preserved
+      # by an anonymous volume on top, so we don't have to reinstall.
+      - ../web:/app/web
+      - ..:/app
+      # Preserve image-provided build artifacts & node_modules
+      - /app/node_modules
+      - /app/web/node_modules
+      - /app/web/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    networks:
+      - default
+
+volumes:
+  api-storage:

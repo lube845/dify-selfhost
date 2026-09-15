@@ -76,13 +76,31 @@ export const useGetUserCanAccessApp = ({ appId, isInstalledApp = true, enabled, 
   // First-fetch undefined is bridged via `?? false` so the inner queryKey is stable.
   const { data: systemFeatures } = useQuery(systemFeaturesQueryOptions())
   const webappAuthEnabled = systemFeatures?.webapp_auth.enabled ?? false
+
+  // Public webapp pages (`/chat/<code>`) are ALWAYS probed, even when the
+  // system-level `webapp_auth` feature is off. The per-app anonymous policy
+  // (`App.access_policy` + `App.allow_anonymous`) is a community-edition
+  // concept enforced by `GET /api/webapp/permission`, which has no dependency
+  // on the enterprise webapp-auth feature — gating the probe on
+  // `webappAuthEnabled` would silently skip it outside enterprise deployments
+  // and the visitor would never receive `auth_required`.
+  //
+  // Installed apps keep the original gate: their check goes through
+  // `GET /console/api/enterprise/webapp/permission`, which only exists when
+  // the enterprise feature is enabled — probing it unconditionally would
+  // surface a spurious error page on community editions.
+  const shouldProbe = !isInstalledApp || webappAuthEnabled
+
   return useQuery({
     queryKey: [NAME_SPACE, 'user-can-access-app', appId, webappAuthEnabled, isInstalledApp],
     queryFn: () => {
-      if (webappAuthEnabled)
+      if (shouldProbe)
         return getUserCanAccess(appId!, isInstalledApp, silent ? { silent: true } : undefined)
-      else
-        return { result: true }
+      // System webapp_auth feature is off AND this is an installed app —
+      // every visitor is implicitly allowed. Keep the response shape in sync
+      // with ``AccessCheckResponse`` so consumers can read ``.reason``
+      // unconditionally.
+      return { result: true, reason: 'allowed' as const }
     },
     enabled: enabled !== undefined ? enabled : !!appId,
     staleTime: 0,

@@ -10,11 +10,12 @@ from werkzeug.exceptions import NotFound, Unauthorized
 from configs import dify_config
 from constants import HEADER_NAME_APP_CODE
 from controllers.web import web_ns
-from controllers.web.error import WebAppAuthRequiredError
+from controllers.web.error import WebAppAuthRequiredError, WebAppLoginRequiredError
 from extensions.ext_database import db
 from libs.passport import PassportService
 from libs.token import extract_webapp_access_token
 from models.model import App, EndUser, Site
+from services.app_access_permission_service import AppAccessPermissionService
 from services.feature_service import FeatureService
 from services.webapp_auth_service import WebAppAuthService, WebAppAuthType
 
@@ -76,6 +77,15 @@ class PassportResource(Resource):
             oa_name = ""
             oa_department = ""
             oa_authenticated = False
+
+        # Per-app anonymous policy, second level of the access policy: the app
+        # accepts default access but its owner turned anonymous visitors off.
+        # Refuse to mint a passport here rather than at the first chat request,
+        # so that (a) the visitor is routed to /oa-login before the chat UI
+        # mounts and (b) no throwaway anonymous ``end_users`` row is created
+        # for a visitor who is never going to be allowed in.
+        if not oa_authenticated and AppAccessPermissionService.requires_login(app=app_model):
+            raise WebAppLoginRequiredError()
 
         if user_id:
             end_user = db.session.scalar(

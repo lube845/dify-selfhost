@@ -7,6 +7,7 @@ type PermissionAppItem = {
   id: string
   name: string
   access_policy: AppAccessPolicy
+  allow_anonymous: boolean
 }
 
 type PermissionAppListResponse = {
@@ -41,7 +42,12 @@ export const permissionsAppUpdateContract = base
   })
   .input(type<{
     params: { appId: string }
-    body: { access_policy: AppAccessPolicy }
+    // Partial update: the console flips one switch at a time, so both fields
+    // are optional but at least one must be sent (enforced server-side).
+    body: {
+      access_policy?: AppAccessPolicy
+      allow_anonymous?: boolean
+    }
   }>())
   .output(type<PermissionAppItem>())
 

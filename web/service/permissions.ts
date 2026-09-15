@@ -5,11 +5,28 @@ export const fetchPermissionsApps = () => {
   return consoleClient.permissions.apps({})
 }
 
-export const updateAppAccessPolicy = (appId: string, accessPolicy: AppAccessPolicy) => {
+/**
+ * Partial update of an app's access policy. The console sends exactly the
+ * field it flipped, so the backend keeps the other one untouched.
+ */
+export type AppPermissionUpdate = {
+  access_policy?: AppAccessPolicy
+  allow_anonymous?: boolean
+}
+
+export const updateAppPermission = (appId: string, body: AppPermissionUpdate) => {
   return consoleClient.permissions.appUpdate({
     params: { appId },
-    body: { access_policy: accessPolicy },
+    body,
   })
+}
+
+export const updateAppAccessPolicy = (appId: string, accessPolicy: AppAccessPolicy) => {
+  return updateAppPermission(appId, { access_policy: accessPolicy })
+}
+
+export const updateAppAllowAnonymous = (appId: string, allowAnonymous: boolean) => {
+  return updateAppPermission(appId, { allow_anonymous: allowAnonymous })
 }
 
 export const fetchWhitelist = (appId: string) => {

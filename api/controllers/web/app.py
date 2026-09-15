@@ -4,15 +4,22 @@ from typing import Any, cast
 from flask import request
 from flask_restx import Resource
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 from werkzeug.exceptions import Unauthorized
 
 from constants import HEADER_NAME_APP_CODE
 from controllers.common import fields
 from controllers.common.schema import register_schema_models
 from core.app.app_config.common.parameters_mapping import get_parameters_from_feature_dict
+from extensions.ext_database import db
 from libs.passport import PassportService
 from libs.token import extract_webapp_passport
-from models.model import App, AppMode
+from models.model import App, AppMode, EndUser
+from services.app_access_permission_service import (
+    AccessCheckResult,
+    AppAccessPermissionService,
+)
 from services.app_service import AppService
 from services.enterprise.enterprise_service import EnterpriseService
 from services.feature_service import FeatureService
@@ -149,27 +156,121 @@ class AppWebAuthPermission(Resource):
         if not app_id or not app_code:
             raise ValueError("appId must be provided")
 
-        require_permission_check = WebAppAuthService.is_app_require_permission_check(app_id=app_id)
-        if not require_permission_check:
-            return {"result": True}
-
-        try:
-            tk = extract_webapp_passport(app_code, request)
-            if not tk:
-                raise Unauthorized("Access token is missing.")
-            decoded = PassportService().verify(tk)
-            user_id = decoded.get("user_id", "visitor")
-        except Unauthorized:
-            raise
-        except Exception:
-            logger.exception("Unexpected error during auth verification")
-            raise
-
         features = FeatureService.get_system_features()
-        if not features.webapp_auth.enabled:
-            return {"result": True}
+        # The access-mode lookup below lives on the enterprise service
+        # (``ENTERPRISE_API_URL``), so it may only be attempted when the
+        # enterprise feature is on. The community edition has no such URL
+        # configured — ``EnterpriseRequest.base_url`` then falls back to the
+        # literal string "ENTERPRISE_API_URL", httpx rejects it for having no
+        # protocol, and the whole precheck 500s.
+        #
+        # Folding ``features.webapp_auth.enabled`` into the value (instead of
+        # ANDing it into every consumer) keeps the gate single-sourced: every
+        # branch below reads ``require_permission_check`` alone, and the
+        # enterprise behaviour is unchanged because the value was already
+        # ANDed with that flag at each use site.
+        require_permission_check = (
+            WebAppAuthService.is_app_require_permission_check(app_id=app_id)
+            if features.webapp_auth.enabled
+            else False
+        )
 
-        res = True
-        if WebAppAuthService.is_app_require_permission_check(app_id=app_id):
-            res = EnterpriseService.WebAppAuth.is_user_allowed_to_access_webapp(str(user_id), app_id)
-        return {"result": res}
+        # Only resolve the passport when an enterprise check actually needs
+        # the user id. Otherwise a missing/expired passport would block
+        # anonymous visits to public apps, which the original code at the
+        # top of this method avoided by short-circuiting on
+        # `not require_permission_check`.
+        if require_permission_check:
+            try:
+                tk = extract_webapp_passport(app_code, request)
+                if not tk:
+                    raise Unauthorized("Access token is missing.")
+                decoded = PassportService().verify(tk)
+                user_id = decoded.get("user_id", "visitor")
+            except Unauthorized:
+                raise
+            except Exception:
+                logger.exception("Unexpected error during auth verification")
+                raise
+
+        # Enterprise webapp_auth gate — preserves prior short-circuit semantics:
+        # when the system feature is off, the enterprise check is skipped.
+        # ``require_permission_check`` is now False whenever the feature is off
+        # (see above), so the extra ``is_app_require_permission_check`` call the
+        # old code repeated in here would always be True and only bought a
+        # second round-trip to the enterprise API — plus a second chance to
+        # 500 on a transient failure. Reuse the cached value instead.
+        if require_permission_check:
+            allowed = EnterpriseService.WebAppAuth.is_user_allowed_to_access_webapp(str(user_id), app_id)
+            if not allowed:
+                return {"result": False, "reason": "denied"}
+
+        # Per-app explicit allowlist (independent of webapp_auth). Runs after
+        # the enterprise check so that an enterprise rejection still wins,
+        # but ALSO runs when webapp_auth is disabled — apps with
+        # access_policy='deny_all_explicit' must be honored regardless.
+        return AppWebAuthPermission._check_app_access_permission(
+            app_id,
+            user_id,
+            enterprise_identity=require_permission_check,
+        )
+
+    @staticmethod
+    def _check_app_access_permission(app_id: str, user_id: str, *, enterprise_identity: bool) -> dict[str, Any]:
+        """Resolve (app, end_user) and run AppAccessPermissionService.
+
+        The result is mapped to a ``reason`` string so the frontend can render
+        distinct UI for each state: ``allowed`` / ``denied`` / ``expired`` and
+        ``auth_required`` (the app refuses anonymous visitors — the visitor can
+        self-recover by signing in, so the frontend routes them to /oa-login
+        instead of the "no permission" page).
+
+        ``enterprise_identity`` tells us the caller already came through the
+        enterprise webapp-auth flow, where the user is identified by an SSO
+        token rather than the ``oa_session`` cookie; such a caller counts as
+        signed in for the per-app anonymous policy.
+
+        Failure modes that fall back to ``{'result': True, 'reason': 'allowed'}``
+        rather than 500'ing:
+        - No App row (defensive; shouldn't happen in practice — wraps.py will
+          reject the actual chat request anyway).
+        - No EndUser row for this ``user_id`` (OA workcode, or any identifier
+          that hasn't been seen by Dify yet). The strict gate at chat-time in
+          ``controllers/web/wraps.py`` will still enforce the allowlist; here
+          we just don't pre-emptively 500 the layout.
+        """
+        _REASON_FROM_RESULT = {
+            AccessCheckResult.ALLOWED: "allowed",
+            AccessCheckResult.DENIED: "denied",
+            AccessCheckResult.EXPIRED: "expired",
+            AccessCheckResult.AUTH_REQUIRED: "auth_required",
+        }
+        try:
+            # Lazy import: ``controllers.web.oa_auth`` imports ``controllers.web``.
+            from controllers.web.oa_auth import is_oa_authenticated
+
+            signed_in = enterprise_identity or is_oa_authenticated()
+            with sessionmaker(bind=db.engine, expire_on_commit=False).begin() as session:
+                app_model = session.scalar(select(App).where(App.id == app_id))
+                if app_model is None:
+                    return {"result": True, "reason": "allowed"}
+                if AppAccessPermissionService.requires_login(app=app_model) and not signed_in:
+                    return {"result": False, "reason": "auth_required"}
+                if app_model.access_policy != "deny_all_explicit":
+                    return {"result": True, "reason": "allowed"}
+                end_user = session.scalar(select(EndUser).where(EndUser.session_id == user_id))
+                if end_user is None:
+                    return {"result": True, "reason": "allowed"}
+                result = AppAccessPermissionService.check_access_with_reason(
+                    app=app_model,
+                    end_user=end_user,
+                    authenticated=signed_in,
+                )
+        except Exception:
+            logger.exception("AppAccessPermission precheck failed; failing closed")
+            return {"result": False, "reason": "denied"}
+
+        return {
+            "result": result == AccessCheckResult.ALLOWED,
+            "reason": _REASON_FROM_RESULT[result],
+        }

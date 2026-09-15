@@ -22,10 +22,16 @@ those two fields ever diverge, this service should be revisited.
 
 Edge cases
 ----------
-- ``App.access_policy == 'allow_all'`` (default): always allow, no permission
-  row required.
-- ``App.access_policy == 'deny_all_explicit'``: allow only if an active
-  ``AppAccessPermission`` row exists for the (app, user) tuple.
+- ``App.access_policy == 'allow_all'`` + ``App.allow_anonymous`` (default):
+  always allow, no permission row required. The visitor may be an anonymous
+  end_user created with a random ``session_id``.
+- ``App.access_policy == 'allow_all'`` + ``App.allow_anonymous is False``: the
+  visitor must carry a signed-in identity (OA session) before chatting. No
+  allowlist row is consulted — any signed-in user is accepted. Anonymous
+  callers get ``AUTH_REQUIRED``.
+- ``App.access_policy == 'deny_all_explicit'``: sign in *and* hold an active
+  ``AppAccessPermission`` row for the (app, user) tuple; anonymous callers get
+  ``AUTH_REQUIRED`` first.
   ``expires_at`` is treated as "active" when NULL or on/after the server's
   local calendar date — the picked day is the **last** day access is granted.
 - Switching ``allow_all`` → ``deny_all_explicit`` on an existing app will
@@ -54,21 +60,25 @@ class AppAccessPolicy(StrEnum):
 
 
 class AccessCheckResult(StrEnum):
-    """Three-way result of ``AppAccessPermissionService.check_access_with_reason``.
+    """Four-way result of ``AppAccessPermissionService.check_access_with_reason``.
 
-    Distinguishing ``DENIED`` from ``EXPIRED`` lets the webapp gate surface
-    two different user-facing messages:
+    Distinguishing the failure modes lets the webapp gate surface a precise
+    user-facing message:
 
-    - ``DENIED``     — the (app, user) tuple has no row at all. The user was
+    - ``DENIED``        — the (app, user) tuple has no row at all. The user was
       never granted access; admin must explicitly grant it.
-    - ``EXPIRED``    — a row exists but its ``expires_at`` is in the past. The
+    - ``EXPIRED``       — a row exists but its ``expires_at`` is in the past. The
       user *was* on the allowlist, so the most accurate message is "permission
       expired, contact admin to renew" rather than the generic "not authorised".
+    - ``AUTH_REQUIRED`` — the app does not accept anonymous visitors and the
+      caller has no signed-in identity. Not a permission problem: the user can
+      self-recover by signing in through ``/oa-login``.
     """
 
     ALLOWED = "allowed"
     DENIED = "denied"
     EXPIRED = "expired"
+    AUTH_REQUIRED = "auth_required"
 
 
 class _Unset:
@@ -99,28 +109,65 @@ class AppAccessPermissionService:
     """CRUD + access check for the ``app_access_permissions`` table."""
 
     @classmethod
-    def check_access(cls, *, app: App, end_user: EndUser) -> bool:
+    def requires_login(cls, *, app: App) -> bool:
+        """Return True when an anonymous visitor may not use ``app``.
+
+        Two independent reasons:
+
+        - ``access_policy == 'deny_all_explicit'`` — the app is allowlist-only,
+          which presupposes an identified user (the allowlist is keyed on
+          ``end_user.session_id``, so an anonymous random uuid could never
+          match an admin-entered value).
+        - ``allow_anonymous is False`` — the admin explicitly turned anonymous
+          access off while keeping default access on.
+
+        Only an explicit ``False`` counts as opt-out: a missing / ``None``
+        value (rows written before the column existed, or an unloaded
+        attribute) keeps the historical permissive behaviour.
+        """
+        if app.access_policy == AppAccessPolicy.DENY_ALL_EXPLICIT.value:
+            return True
+        return getattr(app, "allow_anonymous", True) is False
+
+    @classmethod
+    def check_access(cls, *, app: App, end_user: EndUser, authenticated: bool = True) -> bool:
         """Return True if ``end_user`` may chat on ``app``.
 
         Short-circuits on ``ALLOW_ALL`` without touching the permission table.
         """
-        return cls.check_access_with_reason(app=app, end_user=end_user) == AccessCheckResult.ALLOWED
+        return (
+            cls.check_access_with_reason(app=app, end_user=end_user, authenticated=authenticated)
+            == AccessCheckResult.ALLOWED
+        )
 
     @classmethod
-    def check_access_with_reason(cls, *, app: App, end_user: EndUser) -> AccessCheckResult:
-        """Three-way access check: ALLOWED / DENIED / EXPIRED.
+    def check_access_with_reason(
+        cls, *, app: App, end_user: EndUser, authenticated: bool = True
+    ) -> AccessCheckResult:
+        """Access check returning the reason for a rejection.
 
         ``DENIED`` and ``EXPIRED`` look identical to ``check_access`` (both
         return False) but mean different things on the webapp permission page:
         ``DENIED`` is "you've never been on the allowlist", ``EXPIRED`` is "you
         were on it but your row's ``expires_at`` is in the past". The latter is
         communicated as "权限已过期"; the former as "您未被授权".
+        ``AUTH_REQUIRED`` means the caller is anonymous on an app that does not
+        accept anonymous visitors.
+
+        ``authenticated`` is the caller's *identity* claim — True when the
+        request carries a signed-in user (OA session) rather than an anonymous
+        random-uuid end_user. It defaults to True so that callers predating the
+        ``allow_anonymous`` column keep their previous semantics; the webapp
+        controllers all pass it explicitly.
 
         Implementation note: we issue two queries (active row, then expired row)
         rather than one with ``OR`` to keep each statement's plan simple and
         to avoid a single composite index on the (app_id, user_id, expires_at)
         triple. The first query is the common path and hits the active index.
         """
+        if cls.requires_login(app=app) and not authenticated:
+            return AccessCheckResult.AUTH_REQUIRED
+
         policy = app.access_policy
         if policy == AppAccessPolicy.ALLOW_ALL.value:
             return AccessCheckResult.ALLOWED

@@ -3,7 +3,14 @@
 Three endpoints, all under ``/api/oa``:
 - ``POST /api/oa/login``  — verify OA credentials, issue ``oa_session`` cookie
 - ``POST /api/oa/logout`` — clear the cookie
-- ``GET  /api/oa/me``     — return the current OA session user, or 401
+- ``GET  /api/oa/me``     — return the current OA session user + expiry, or 401
+
+The cookie carries an ``exp`` claim and a matching ``Max-Age``, both derived
+from ``OA_SESSION_EXPIRE_HOURS`` (default 8). Expiry is enforced on both ends:
+``decode_oa_session_cookie`` returns None once the JWT lapses — so the webapp
+gates in ``controllers/web/wraps.py`` / ``passport.py`` / ``app.py`` treat the
+visitor as anonymous again — and ``/oa/me`` reports ``expires_at`` so the chat
+sidebar can show the deadline and bounce the visitor back to ``/oa-login``.
 
 This is intentionally separate from Dify's webapp auth: a successful OA login
 lets the visitor open ``/chat/[token]`` (gated by the Next.js middleware), but
@@ -17,7 +24,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from flask import Response, request
+from flask import Response, has_request_context, request
 from flask_restx import Resource
 from werkzeug.exceptions import BadRequest, Unauthorized
 
@@ -82,6 +89,25 @@ def decode_oa_session_cookie() -> dict[str, Any] | None:
     return decoded
 
 
+def is_oa_authenticated() -> bool:
+    """True when the request carries a usable, signed-in OA session.
+
+    Thin predicate over ``decode_oa_session_cookie`` for the webapp access
+    gates (``controllers/web/wraps.py``, ``controllers/web/passport.py``,
+    ``controllers/web/app.py``). A cookie that verifies but carries no
+    workcode is not a usable identity, so it does not count as signed in.
+
+    Outside a request context (background jobs, unit tests) there is no cookie
+    to read; report "not signed in" rather than raising, so callers fail closed
+    instead of blowing up with a 500.
+    """
+    if not has_request_context():
+        return False
+
+    decoded = decode_oa_session_cookie()
+    return bool(decoded and decoded.get("workcode"))
+
+
 @web_ns.route("/oa/login")
 class OALoginResource(Resource):
     @web_ns.doc("oa_login")
@@ -134,6 +160,11 @@ class OALogoutResource(Resource):
         return response
 
 
+def _iso_utc(epoch_seconds: int) -> str:
+    """Render a JWT ``exp`` claim as an ISO-8601 UTC string."""
+    return datetime.fromtimestamp(epoch_seconds, tz=UTC).isoformat()
+
+
 @web_ns.route("/oa/me")
 class OAmeResource(Resource):
     @web_ns.doc("oa_me")
@@ -148,10 +179,17 @@ class OAmeResource(Resource):
         decoded = decode_oa_session_cookie()
         if decoded is None:
             raise Unauthorized("No valid OA session")
+        exp = decoded.get("exp")
         return {
             "workcode": decoded.get("workcode", ""),
             "name": decoded.get("name", ""),
             "department": decoded.get("department", ""),
+            # ``expires_at`` lets the chat sidebar show until when the sign-in
+            # is valid, and lets the client arm a timer so the visitor is sent
+            # back to /oa-login the moment the window closes instead of
+            # discovering it on their next chat request.
+            "expires_at": _iso_utc(int(exp)) if exp else None,
+            "session_expire_hours": dify_config.OA_SESSION_EXPIRE_HOURS,
         }
 
 
@@ -159,4 +197,5 @@ __all__ = [
     "OA_SESSION_COOKIE_NAME",
     "OA_SESSION_TOKEN_SOURCE",
     "decode_oa_session_cookie",
+    "is_oa_authenticated",
 ]

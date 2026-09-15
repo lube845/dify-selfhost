@@ -182,6 +182,53 @@ class TestRequestPayloads:
 # ---------- access semantics -------------------------------------------------
 
 
+class TestAppPermissionUpdatePayload:
+    """The app policy PATCH is a partial update: either field, on its own."""
+
+    def test_accepts_access_policy_only(self):
+        from controllers.console.permission import _AppPermissionUpdatePayload
+
+        payload = _AppPermissionUpdatePayload.model_validate(
+            {"access_policy": "deny_all_explicit"}
+        )
+        assert payload.access_policy == "deny_all_explicit"
+        # Untouched fields stay None so the controller knows not to write them.
+        assert payload.allow_anonymous is None
+
+    def test_accepts_allow_anonymous_only(self):
+        from controllers.console.permission import _AppPermissionUpdatePayload
+
+        payload = _AppPermissionUpdatePayload.model_validate({"allow_anonymous": False})
+        assert payload.allow_anonymous is False
+        assert payload.access_policy is None
+
+    def test_accepts_both(self):
+        from controllers.console.permission import _AppPermissionUpdatePayload
+
+        payload = _AppPermissionUpdatePayload.model_validate(
+            {"access_policy": "allow_all", "allow_anonymous": True}
+        )
+        assert payload.access_policy == "allow_all"
+        assert payload.allow_anonymous is True
+
+    def test_rejects_unknown_policy(self):
+        from pydantic import ValidationError
+
+        from controllers.console.permission import _AppPermissionUpdatePayload
+
+        with pytest.raises(ValidationError):
+            _AppPermissionUpdatePayload.model_validate({"access_policy": "sometimes"})
+
+    def test_rejects_empty_payload(self):
+        """An empty body must be rejected rather than silently no-op'ing."""
+        from pydantic import ValidationError
+
+        from controllers.console.permission import _AppPermissionUpdatePayload
+
+        with pytest.raises(ValidationError):
+            _AppPermissionUpdatePayload.model_validate({})
+
+
 class TestCheckAccessBoundaries:
     """``check_access`` must treat the picked day as the *last* day access is
     granted. The matching SQL fragment is

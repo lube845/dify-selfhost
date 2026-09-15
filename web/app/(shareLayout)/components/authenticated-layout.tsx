@@ -1,9 +1,7 @@
 'use client'
 
-import { toast } from '@langgenius/dify-ui/toast'
 import * as React from 'react'
-import { useCallback, useEffect, useRef } from 'react'
-import { useTranslation } from 'react-i18next'
+import { useCallback, useEffect } from 'react'
 import AppUnavailable from '@/app/components/base/app-unavailable'
 import Loading from '@/app/components/base/loading'
 import { useWebAppStore } from '@/context/web-app-context'
@@ -13,16 +11,15 @@ import { useGetWebAppInfo, useGetWebAppMeta, useGetWebAppParams } from '@/servic
 import { webAppLogout } from '@/service/webapp-auth'
 
 const AuthenticatedLayout = ({ children }: { children: React.ReactNode }) => {
-  const { t } = useTranslation()
   const shareCode = useWebAppStore(s => s.shareCode)
   const updateAppInfo = useWebAppStore(s => s.updateAppInfo)
   const updateAppParams = useWebAppStore(s => s.updateAppParams)
   const updateWebAppMeta = useWebAppStore(s => s.updateWebAppMeta)
   const updateUserCanAccessApp = useWebAppStore(s => s.updateUserCanAccessApp)
   // All four fetches have their errors surfaced as a page-level AppUnavailable
-  // (or the 403 "no permission" branch below). Suppress the global fetch hook
-  // toast for them so the user only sees ONE clear message, not a stack of
-  // per-query toasts.
+  // (or the permission-denied / permission-expired branches below). Suppress
+  // the global fetch hook toast for them so the user only sees ONE clear
+  // message, not a stack of per-query toasts.
   const { isFetching: isFetchingAppParams, data: appParams, error: appParamsError } = useGetWebAppParams({ silent: true })
   const { isFetching: isFetchingAppInfo, data: appInfo, error: appInfoError } = useGetWebAppInfo({ silent: true })
   const { isFetching: isFetchingAppMeta, data: appMeta, error: appMetaError } = useGetWebAppMeta({ silent: true })
@@ -37,20 +34,6 @@ const AuthenticatedLayout = ({ children }: { children: React.ReactNode }) => {
       updateWebAppMeta(appMeta)
     updateUserCanAccessApp(Boolean(userCanAccessApp && userCanAccessApp?.result))
   }, [appInfo, appMeta, appParams, updateAppInfo, updateAppParams, updateUserCanAccessApp, updateWebAppMeta, userCanAccessApp])
-
-  // Show a single "no permission" toast when the permission check fails
-  // (either by 403/error, or by a 200 with result: false). A ref guard makes
-  // sure we only fire it once per access denial, even if the queries retry.
-  const noPermissionToastShownRef = useRef(false)
-  const hasNoPermission = Boolean(useCanAccessAppError) || (userCanAccessApp ? !userCanAccessApp.result : false)
-  useEffect(() => {
-    if (hasNoPermission && !noPermissionToastShownRef.current) {
-      noPermissionToastShownRef.current = true
-      toast.error(t('webapp.accessDenied', { ns: 'common' }))
-    }
-    if (!hasNoPermission)
-      noPermissionToastShownRef.current = false
-  }, [hasNoPermission, t])
 
   const router = useRouter()
   const pathname = usePathname()
@@ -69,6 +52,46 @@ const AuthenticatedLayout = ({ children }: { children: React.ReactNode }) => {
     const url = getSigninUrl()
     router.replace(url)
   }, [getSigninUrl, router, shareCode])
+
+  // Where to send a visitor whose app does not accept anonymous visitors.
+  // The current webapp URL rides along as `redirect_url` so /oa-login can
+  // hand them straight back after a successful sign-in.
+  const getOALoginUrl = useCallback(() => {
+    const params = new URLSearchParams(searchParams)
+    const query = params.toString()
+    const fullPath = query ? `${pathname}?${query}` : pathname
+    return `/oa-login?redirect_url=${encodeURIComponent(fullPath)}`
+  }, [searchParams, pathname])
+
+  // Four-state permission gate, driven by the backend `/webapp/permission`
+  // endpoint's `{ result, reason }`:
+  //   - allowed        → render the chat
+  //   - denied         → the visitor was never on the allowlist; needs an admin
+  //   - expired        → they were on it but the row lapsed; needs an admin
+  //   - auth_required  → the app turned anonymous access off; the visitor can
+  //                      self-recover by signing in via /oa-login
+  // The first three are terminal standalone pages; `auth_required` is a
+  // redirect, not a dead end.
+  //
+  // IMPORTANT: hooks MUST run before any conditional returns below.
+  // React's Rules of Hooks require hooks to fire in the same order on every
+  // render. The error-return ``if`` statements below are conditional returns,
+  // and the redirect effects must be declared above them — otherwise the
+  // hook order shifts between renders and React throws minified #300 at
+  // runtime.
+  const shouldRedirectAway = Boolean(userCanAccessApp && !userCanAccessApp.result)
+  useEffect(() => {
+    if (shouldRedirectAway) {
+      if (userCanAccessApp?.reason === 'auth_required') {
+        router.replace(getOALoginUrl())
+        return
+      }
+      const target = userCanAccessApp?.reason === 'expired'
+        ? '/webapp-permission-expired'
+        : '/webapp-no-permission'
+      router.replace(target)
+    }
+  }, [shouldRedirectAway, router, userCanAccessApp, getOALoginUrl])
 
   if (appInfoError) {
     return (
@@ -98,13 +121,8 @@ const AuthenticatedLayout = ({ children }: { children: React.ReactNode }) => {
       </div>
     )
   }
-  if (userCanAccessApp && !userCanAccessApp.result) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-y-2">
-        <AppUnavailable className="h-auto w-auto" code={403} unknownReason="no permission." />
-        <span className="cursor-pointer system-sm-regular text-text-tertiary" onClick={backToHome}>{t('userProfile.logout', { ns: 'common' })}</span>
-      </div>
-    )
+  if (shouldRedirectAway) {
+    return null
   }
   if (isFetchingAppInfo || isFetchingAppParams || isFetchingAppMeta) {
     return (

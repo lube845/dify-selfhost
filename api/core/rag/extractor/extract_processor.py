@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import subprocess
@@ -6,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Union
 from urllib.parse import unquote
+
+logger = logging.getLogger(__name__)
 
 from configs import dify_config
 from core.helper import ssrf_proxy
@@ -54,11 +57,19 @@ def _run_libreoffice_subprocess(
 
     The dify Docker image runs as user ``dify`` whose ``$HOME=/home/dify`` does
     not exist (the Dockerfile uses ``useradd -r`` without ``-m``). Without an
-    explicit profile, LibreOffice attempts ``$HOME/.cache/dconf``, fails with
+    explicit profile, LibreOffice attempts ``$HOME/.cache/dconf`, fails with
     "User installation could not be completed", and then surfaces a misleading
     "Unsupported Extension Type" error for every input. We pin LibreOffice to
     a fresh, writable, per-call profile directory and override ``$HOME`` for
     the subprocess to bypass that.
+
+    For ambiguous extensions like ``.doc`` (Word 97 vs Word 95 vs Works) we
+    pass ``--infilter=MS Word 97``; if the hinted conversion fails, we retry
+    once without the infilter so LibreOffice can fall back to content-based
+    auto-detection. ``.wps`` and ``.et`` (modern WPS Office) are NOT pinned —
+    ``MS_Works`` only handles the old Microsoft Works format (1986–2007) and
+    rejects modern WPS Office files, which are ZIP/OXML containers LibreOffice
+    detects by magic bytes.
 
     Raises:
         ValueError: conversion timed out, the LibreOffice CLI returned non-zero,
@@ -67,35 +78,74 @@ def _run_libreoffice_subprocess(
     """
     import shutil as _shutil
 
+    # Only `.doc` is genuinely ambiguous; `.wps` and `.et` should rely on
+    # content sniffing rather than a forced (and wrong) infilter.
+    infilter_for: dict[str, str] = {
+        ".doc": "MS Word 97",
+    }
+    infilter = infilter_for.get(file_extension)
+
     profile_dir = tempfile.mkdtemp(prefix="lo_profile_")
     env = os.environ.copy()
     env["HOME"] = profile_dir
     try:
-        subprocess.run(
-            [
-                "libreoffice",
-                f"-env:UserInstallation=file://{profile_dir}",
-                "--headless",
-                "--convert-to",
-                target_ext,
-                "--outdir",
-                convert_dir,
-                file_path,
-            ],
-            check=True,
-            capture_output=True,
-            timeout=30,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise ValueError(
-            f"LibreOffice conversion to .{target_ext} timed out after 30s ({file_extension})"
-        ) from e
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode("utf-8", errors="ignore") if e.stderr else ""
-        raise ValueError(
-            f"LibreOffice failed to convert {file_extension} to .{target_ext}: {stderr}"
-        ) from e
+        cmd = [
+            "libreoffice",
+            f"-env:UserInstallation=file://{profile_dir}",
+            "--headless",
+            "--convert-to",
+            target_ext,
+        ]
+        if infilter is not None:
+            cmd.append(f"--infilter={infilter}")
+        cmd.extend(["--outdir", convert_dir, file_path])
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=30, env=env)
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode("utf-8", errors="ignore") if e.stderr else ""
+            if infilter is not None:
+                # Retry without the infilter; LibreOffice's content sniffer is
+                # more reliable for ambiguous inputs than its extension-driven
+                # dispatch.
+                logger.info(
+                    "LibreOffice %s -> .%s failed with infilter=%r (%s); retrying without infilter",
+                    file_extension,
+                    target_ext,
+                    infilter,
+                    stderr.strip(),
+                )
+                cmd_no_infilter = [
+                    "libreoffice",
+                    f"-env:UserInstallation=file://{profile_dir}",
+                    "--headless",
+                    "--convert-to",
+                    target_ext,
+                    "--outdir",
+                    convert_dir,
+                    file_path,
+                ]
+                try:
+                    subprocess.run(
+                        cmd_no_infilter, check=True, capture_output=True, timeout=30, env=env
+                    )
+                except subprocess.CalledProcessError as retry_err:
+                    retry_stderr = (
+                        retry_err.stderr.decode("utf-8", errors="ignore") if retry_err.stderr else ""
+                    )
+                    raise ValueError(
+                        f"LibreOffice failed to convert {file_extension} to .{target_ext} "
+                        f"(with and without infilter={infilter!r}): "
+                        f"first attempt: {stderr}; retry: {retry_stderr}"
+                    ) from retry_err
+            else:
+                raise ValueError(
+                    f"LibreOffice failed to convert {file_extension} to .{target_ext}: {stderr}"
+                ) from e
+        except subprocess.TimeoutExpired as e:
+            raise ValueError(
+                f"LibreOffice conversion to .{target_ext} timed out after 30s ({file_extension})"
+            ) from e
     except FileNotFoundError as e:
         raise RuntimeError(
             "libreoffice binary not found in container; install libreoffice-writer/libreoffice-calc in api/Dockerfile"
@@ -105,6 +155,11 @@ def _run_libreoffice_subprocess(
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     produced = os.path.join(convert_dir, f"{base_name}.{target_ext}")
     if not os.path.exists(produced):
+        # Some LibreOffice versions name the output after a different stem.
+        # Try one glob fallback before giving up.
+        for candidate in os.listdir(convert_dir):
+            if candidate.endswith(f".{target_ext}"):
+                return
         raise ValueError(
             f"LibreOffice did not produce .{target_ext} output for {file_path} ({file_extension})"
         )

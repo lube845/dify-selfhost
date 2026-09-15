@@ -1,0 +1,120 @@
+# Dev image for the Dify API.
+#
+# Runs `flask run --debug` so Werkzeug's file watcher restarts the
+# server on any .py change inside /app/api (bind-mounted from the
+# host). Installs the runtime default groups (storage / tools /
+# vdb-all / trace-all) — the same set the production image uses.
+# Dev-only deps (pytest / ruff / mypy / ... and the `dify-agent`
+# path-source) are intentionally omitted; see `docker/dev/README.md`
+# for the manual incantation if you need to run tests inside the
+# container.
+#
+# Build context: this directory (api/).
+#
+# Build-time speed-ups:
+#   1. Aliyun Debian mirror  → faster apt (instead of dl.debian.org)
+#   2. Aliyun PyPI mirror    → faster uv (instead of pypi.org)
+#   3. BuildKit cache mount  → uv's download cache survives across builds
+#   4. Increased UV_HTTP_TIMEOUT → 1800 s handles big wheels (pdfminer-six,
+#      intersystems-irispython) + UV_HTTP_RETRIES=2 for transient mirror
+#      hiccups (pypdfium2 occasionally drops mid-stream on Aliyun)
+
+# syntax=docker/dockerfile:1.7  # enables BuildKit --mount=type=cache
+
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app/api
+
+# ---------------------------------------------------------------------------
+# 1. uv installer (small, always cacheable)
+# ---------------------------------------------------------------------------
+ENV UV_VERSION=0.8.9
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
+
+# ---------------------------------------------------------------------------
+# 2. Switch apt to Aliyun mirror for faster downloads from China,
+#    then install build deps for Python wheels (gmpy2, psycopg, lxml, ...).
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    sed -i 's@deb.debian.org@mirrors.aliyun.com@g; s@security.debian.org@mirrors.aliyun.com@g' \
+        /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's@deb.debian.org@mirrors.aliyun.com@g; s@security.debian.org@mirrors.aliyun.com@g' \
+        /etc/apt/sources.list; \
+    apt-get update \
+    && apt-get install -y --no-install-recommends \
+        g++ \
+        libmpfr-dev libmpc-dev \
+        curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# 3. Copy lockfile + workspace members and install runtime dependencies.
+#    The source tree itself is bind-mounted at runtime, so we don't COPY it
+#    here — only the metadata files needed to resolve packages.
+#
+#    We install the DEFAULT groups (storage / tools / vdb-all / trace-all),
+#    which match the production image. We deliberately skip `--all-groups`:
+#    the `dev` group depends on the sibling `../dify-agent` path source,
+#    which is NOT available in this build context (and isn't needed at
+#    runtime — dev deps are pytest/ruff/mypy etc. for testing only).
+# ---------------------------------------------------------------------------
+COPY pyproject.toml uv.lock ./
+COPY providers ./providers
+
+ENV VIRTUAL_ENV=/app/api/.venv
+
+# ---------------------------------------------------------------------------
+# 4. uv sync with PyPI mirror + cache mount + generous timeout.
+#
+#    UV_INDEX_URL switches the package index to the Aliyun mirror, which
+#    is much faster from China. uv.lock is content-hashed, so the resolved
+#    set is identical regardless of mirror.
+#
+#    `--mount=type=cache,target=/root/.cache/uv` keeps the uv download
+#    cache OUTSIDE the image layer. Subsequent builds (even after
+#    pyproject.toml / uv.lock changes) reuse already-downloaded wheels
+#    instead of re-pulling from the network.
+#
+#    UV_HTTP_TIMEOUT=600 handles the occasional 50 MB wheel (e.g.
+#    pdfminer-six) without timing out.
+# ---------------------------------------------------------------------------
+ARG UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+# Aliyun mirror occasionally drops individual wheels mid-stream; 1800s
+# is enough for the largest (intersystems-irispython ~15 MB,
+# pypdfium2 ~3.5 MB) to complete even on a flaky link.
+ARG UV_HTTP_TIMEOUT=1800
+# Retry once on transient network errors — the Aliyun mirror is fast
+# overall, but pypdfium2 / pdfminer-six have been seen to fail once
+# before succeeding on retry.
+ENV UV_HTTP_RETRIES=2
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    UV_INDEX_URL=${UV_INDEX_URL} \
+    UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT} \
+    uv sync --frozen
+
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# ---------------------------------------------------------------------------
+# 5. Runtime defaults — overridden by docker-compose.dev.yaml
+# ---------------------------------------------------------------------------
+ENV FLASK_APP=app.py \
+    FLASK_DEBUG=true
+
+# Pre-populate tiktoken cache so the first request doesn't redownload
+ENV TIKTOKEN_CACHE_DIR=/app/api/.tiktoken_cache
+RUN mkdir -p "${TIKTOKEN_CACHE_DIR}" \
+    && python -c "import tiktoken; tiktoken.encoding_for_model('gpt2')"
+
+EXPOSE 5001
+
+# ---------------------------------------------------------------------------
+# 6. Entrypoint — Flask dev server with auto-reload.
+#    Note: `flask run` is single-threaded and does NOT support WebSocket,
+#    so the streaming chat endpoint will not work in this mode. Switch to
+#    gunicorn + geventwebsocket worker when you need to test streaming.
+# ---------------------------------------------------------------------------
+CMD ["flask", "run", "--host=0.0.0.0", "--port=5001", "--debug"]

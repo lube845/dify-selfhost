@@ -9,7 +9,7 @@ import pytest
 from flask import Flask
 from werkzeug.exceptions import NotFound, Unauthorized
 
-from controllers.web.error import WebAppAuthRequiredError
+from controllers.web.error import WebAppAuthRequiredError, WebAppLoginRequiredError
 from controllers.web.passport import (
     PassportResource,
     decode_enterprise_webapp_user_id,
@@ -136,7 +136,10 @@ class TestPassportResource:
     ) -> None:
         mock_features.return_value = SimpleNamespace(webapp_auth=SimpleNamespace(enabled=False))
         site = SimpleNamespace(app_id="app-1", code="code1")
-        app_model = SimpleNamespace(id="app-1", status="normal", enable_site=True, tenant_id="t1")
+        app_model = SimpleNamespace(
+            id="app-1", status="normal", enable_site=True, tenant_id="t1",
+            access_policy="allow_all", allow_anonymous=True,
+        )
         mock_db.session.scalar.side_effect = [site, app_model]
         mock_passport_cls.return_value.issue.return_value = "issued-token"
 
@@ -159,7 +162,10 @@ class TestPassportResource:
     ) -> None:
         mock_features.return_value = SimpleNamespace(webapp_auth=SimpleNamespace(enabled=False))
         site = SimpleNamespace(app_id="app-1", code="code1")
-        app_model = SimpleNamespace(id="app-1", status="normal", enable_site=True, tenant_id="t1")
+        app_model = SimpleNamespace(
+            id="app-1", status="normal", enable_site=True, tenant_id="t1",
+            access_policy="allow_all", allow_anonymous=True,
+        )
         existing_user = SimpleNamespace(id="eu-1", session_id="sess-existing")
         mock_db.session.scalar.side_effect = [site, app_model, existing_user]
         mock_passport_cls.return_value.issue.return_value = "reused-token"
@@ -170,6 +176,38 @@ class TestPassportResource:
         assert response.get_json()["access_token"] == "reused-token"
         # Should not create a new end user
         mock_db.session.add.assert_not_called()
+
+    @patch("controllers.web.passport.PassportService")
+    @patch("controllers.web.passport.db")
+    @patch("controllers.web.passport.FeatureService.get_system_features")
+    def test_refuses_anonymous_passport_when_app_requires_login(
+        self,
+        mock_features: MagicMock,
+        mock_db: MagicMock,
+        mock_passport_cls: MagicMock,
+        app: Flask,
+    ) -> None:
+        """allow_anonymous=False: refuse instead of minting a throwaway end_user.
+
+        Covers the second level of the access policy — default access is on but
+        the app owner turned anonymous visitors off, so the visitor must sign in
+        through /oa-login before a passport is handed out.
+        """
+        mock_features.return_value = SimpleNamespace(webapp_auth=SimpleNamespace(enabled=False))
+        site = SimpleNamespace(app_id="app-1", code="code1")
+        app_model = SimpleNamespace(
+            id="app-1", status="normal", enable_site=True, tenant_id="t1",
+            access_policy="allow_all", allow_anonymous=False,
+        )
+        mock_db.session.scalar.side_effect = [site, app_model]
+
+        with app.test_request_context("/passport", headers={"X-App-Code": "code1"}):
+            with pytest.raises(WebAppLoginRequiredError):
+                PassportResource().get()
+
+        # The refusal happens before any end_user row is written.
+        mock_db.session.add.assert_not_called()
+        mock_passport_cls.return_value.issue.assert_not_called()
 
     @patch("controllers.web.passport.db")
     @patch("controllers.web.passport.FeatureService.get_system_features")

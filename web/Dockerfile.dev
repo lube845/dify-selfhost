@@ -1,0 +1,55 @@
+# Dev image for the Dify web frontend.
+#
+# Runs `next dev` (Turbopack) so edits to .ts/.tsx files trigger HMR
+# without restarting the container. The build context must be the
+# repository root because pnpm-workspace.yaml lives there.
+#
+# Build context: the repository root (i.e. `..` from this file).
+#
+# Build-time speed-ups:
+#   1. registry.npmmirror.com  → faster than registry.npmjs.org from China
+#   2. BuildKit cache mount    → pnpm store survives across builds
+
+# syntax=docker/dockerfile:1.7  # enables BuildKit --mount=type=cache
+
+FROM node:22-alpine
+
+# ---------------------------------------------------------------------------
+# 1. pnpm via corepack
+# ---------------------------------------------------------------------------
+RUN corepack enable
+ENV COREPACK_REGISTRY=https://registry.npmmirror.com/ \
+    PNPM_HOME="/pnpm" \
+    PATH="$PNPM_HOME:$PATH" \
+    NODE_ENV=development \
+    NEXT_TELEMETRY_DISABLED=1
+
+# ---------------------------------------------------------------------------
+# 2. Copy only workspace metadata to maximise Docker layer caching.
+#    The actual source tree is bind-mounted at runtime.
+# ---------------------------------------------------------------------------
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY web/package.json ./web/
+COPY e2e/package.json ./e2e/
+COPY sdks/nodejs-client/package.json ./sdks/nodejs-client/
+COPY packages ./packages
+
+# `VITE_GIT_HOOKS=0` avoids any husky-style side effects inside the container.
+# `--mount=type=cache,target=/pnpm/store` keeps the pnpm store OUTSIDE the
+# image layer, so subsequent builds (even after lockfile changes) reuse
+# already-downloaded packages.
+RUN --mount=type=cache,target=/pnpm/store,sharing=locked \
+    --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    VITE_GIT_HOOKS=0 \
+    pnpm install --frozen-lockfile
+
+# ---------------------------------------------------------------------------
+# 3. Entrypoint — `next dev` with Turbopack HMR.
+#    Host/port come from env (HOSTNAME=0.0.0.0, PORT=3000).
+# ---------------------------------------------------------------------------
+WORKDIR /app/web
+EXPOSE 3000
+
+CMD ["pnpm", "run", "dev"]

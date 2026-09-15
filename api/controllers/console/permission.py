@@ -2,7 +2,12 @@
 
 Endpoints are tenant-scoped via ``current_account_with_tenant()``. Whitelist
 CRUD talks to ``AppAccessPermission`` directly (this is admin tooling, not
-the chat hot path). The ``access_policy`` toggle mutates ``App.access_policy``.
+the chat hot path). The controls on ``/permissions/apps/<app_id>`` mutate
+``App.access_policy`` (default-allow vs explicit-deny) and
+``App.allow_anonymous`` (whether a visitor with no signed-in identity may
+chat). ``allow_anonymous`` only matters while ``access_policy`` is
+``allow_all`` — under ``deny_all_explicit`` the visitor must sign in *and*
+hold an allowlist row, so anonymous access is impossible either way.
 
 ``expires_at`` is a calendar date (no time, no timezone) — the picked day is
 the **last** day access is granted. Storing a ``datetime`` here used to round
@@ -15,7 +20,10 @@ Pairing
 Frontend at ``web/app/(commonLayout)/permissions/page.tsx`` and
 ``web/service/permissions.ts``. Access checks live in
 ``services.app_access_permission_service.AppAccessPermissionService.check_access``
-(uses ``date.today() >= expires_at``, so the picked day itself is still valid).
+(uses ``date.today() >= expires_at``, so the picked day itself is still valid)
+and are enforced on the webapp side in ``controllers/web/wraps.py`` (chat
+requests), ``controllers/web/passport.py`` (passport issuance) and
+``controllers/web/app.py`` (``/webapp/permission`` precheck).
 """
 
 from __future__ import annotations
@@ -42,8 +50,22 @@ from .wraps import account_initialization_required, setup_required
 # --- Request payloads ---------------------------------------------------------
 
 
-class _AccessPolicyUpdatePayload(BaseModel):
-    access_policy: Literal["allow_all", "deny_all_explicit"]
+class _AppPermissionUpdatePayload(BaseModel):
+    """Partial update of an app's access policy.
+
+    Both fields are optional so the console can flip one switch without having
+    to echo the other one back; at least one must be present. Unknown / empty
+    payloads are rejected rather than silently no-opped.
+    """
+
+    access_policy: Literal["allow_all", "deny_all_explicit"] | None = None
+    allow_anonymous: bool | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> _AppPermissionUpdatePayload:
+        if not self.model_fields_set:
+            raise ValueError("At least one of `access_policy` / `allow_anonymous` must be provided.")
+        return self
 
 
 class _WhitelistCreatePayload(BaseModel):
@@ -83,6 +105,7 @@ class _PermissionAppItem(ResponseModel):
     id: str
     name: str
     access_policy: str
+    allow_anonymous: bool
 
 
 class _PermissionAppList(ResponseModel):
@@ -115,7 +138,7 @@ class _ResultResponse(ResponseModel):
 
 register_schema_models(
     console_ns,
-    _AccessPolicyUpdatePayload,
+    _AppPermissionUpdatePayload,
     _WhitelistCreatePayload,
     _WhitelistUpdatePayload,
     _PermissionAppItem,
@@ -152,7 +175,7 @@ def _load_tenant_app(app_id: str, tenant_id: str) -> App:
 
 @console_ns.route("/permissions/apps")
 class PermissionAppListApi(Resource):
-    """List all apps in the current tenant with their ``access_policy``."""
+    """List all apps in the current tenant with their access policy."""
 
     method_decorators = [setup_required, login_required, account_initialization_required]
 
@@ -160,26 +183,32 @@ class PermissionAppListApi(Resource):
         _, current_tenant_id = current_account_with_tenant()
         with sessionmaker(bind=db.engine, expire_on_commit=False).begin() as session:
             rows = session.execute(
-                select(App.id, App.name, App.access_policy)
+                select(App.id, App.name, App.access_policy, App.allow_anonymous)
                 .where(App.tenant_id == current_tenant_id)
                 .order_by(App.created_at.desc())
             ).all()
         items = [
-            _PermissionAppItem(id=app_id, name=app_name, access_policy=access_policy)
-            for app_id, app_name, access_policy in rows
+            _PermissionAppItem(
+                id=app_id,
+                name=app_name,
+                access_policy=access_policy,
+                allow_anonymous=allow_anonymous,
+            )
+            for app_id, app_name, access_policy, allow_anonymous in rows
         ]
         return _PermissionAppList(data=items).model_dump(mode="json")
 
 
 @console_ns.route("/permissions/apps/<uuid:app_id>")
 class PermissionAppApi(Resource):
-    """Update an app's ``access_policy`` (default-allow vs explicit-deny)."""
+    """Update an app's access policy (default-allow vs explicit-deny, and
+    whether anonymous visitors may chat)."""
 
     method_decorators = [setup_required, login_required, account_initialization_required]
 
     def patch(self, app_id):
         _, current_tenant_id = current_account_with_tenant()
-        payload = _AccessPolicyUpdatePayload.model_validate(console_ns.payload or {})
+        payload = _AppPermissionUpdatePayload.model_validate(console_ns.payload or {})
 
         _load_tenant_app(str(app_id), current_tenant_id)
 
@@ -191,13 +220,20 @@ class PermissionAppApi(Resource):
             # No-op guard: skip the UPDATE (and the consequent `updated_at`
             # bump from `onupdate=current_timestamp`) when the policy is
             # already in the requested state.
-            if app_row.access_policy != payload.access_policy:
+            changed = False
+            if payload.access_policy is not None and app_row.access_policy != payload.access_policy:
                 app_row.access_policy = payload.access_policy
+                changed = True
+            if payload.allow_anonymous is not None and app_row.allow_anonymous != payload.allow_anonymous:
+                app_row.allow_anonymous = payload.allow_anonymous
+                changed = True
+            if changed:
                 session.flush()
             response = _PermissionAppItem(
                 id=app_row.id,
                 name=app_row.name,
                 access_policy=app_row.access_policy,
+                allow_anonymous=app_row.allow_anonymous,
             )
         return response.model_dump(mode="json")
 

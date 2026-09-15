@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 from services.app_access_permission_service import (
     UNSET,
+    AccessCheckResult,
     AppAccessPermissionService,
     AppAccessPolicy,
 )
@@ -122,7 +123,12 @@ class TestCheckAccess:
         ):
             AppAccessPermissionService.check_access(app=app, end_user=end_user)
 
-        session.scalar.assert_called_once()
+        # Two lookups: the active window first, then the expired one.
+        assert session.scalar.call_count == 2
+        active_query = session.scalar.call_args_list[0].args[0].compile(
+            compile_kwargs={"literal_binds": True}
+        )
+        assert "session-xyz" in str(active_query)
 
     def test_unknown_policy_fails_closed(self):
         """Defensive: an unrecognised policy value must NOT grant access."""
@@ -136,6 +142,95 @@ class TestCheckAccess:
 
         assert result is False
         mock_sessionmaker.assert_not_called()
+
+
+class TestAnonymousPolicy:
+    """``requires_login`` + the AUTH_REQUIRED short-circuit.
+
+    Second level of the access policy: an app can keep default access on while
+    still refusing visitors that have no signed-in identity.
+    """
+
+    def _make_app(self, policy: str, *, allow_anonymous: bool | None = None) -> MagicMock:
+        app = MagicMock()
+        app.id = "app-1"
+        app.access_policy = policy
+        if allow_anonymous is not None:
+            app.allow_anonymous = allow_anonymous
+        return app
+
+    def test_allow_all_with_anonymous_on_needs_no_login(self):
+        assert AppAccessPermissionService.requires_login(
+            app=self._make_app(AppAccessPolicy.ALLOW_ALL.value, allow_anonymous=True)
+        ) is False
+
+    def test_allow_all_with_anonymous_off_requires_login(self):
+        assert AppAccessPermissionService.requires_login(
+            app=self._make_app(AppAccessPolicy.ALLOW_ALL.value, allow_anonymous=False)
+        ) is True
+
+    def test_allowlist_only_app_requires_login(self):
+        # deny_all_explicit presupposes an identified user, so it forces a
+        # sign-in no matter how allow_anonymous is set.
+        assert AppAccessPermissionService.requires_login(
+            app=self._make_app(AppAccessPolicy.DENY_ALL_EXPLICIT.value, allow_anonymous=True)
+        ) is True
+
+    def test_missing_flag_keeps_historical_behaviour(self):
+        # Rows written before the column existed (or an attribute that was
+        # never loaded) must not start locking visitors out.
+        assert AppAccessPermissionService.requires_login(
+            app=self._make_app(AppAccessPolicy.ALLOW_ALL.value)
+        ) is False
+
+    def test_anonymous_caller_gets_auth_required_without_touching_db(self):
+        app = self._make_app(AppAccessPolicy.ALLOW_ALL.value, allow_anonymous=False)
+        end_user = self._make_end_user()
+
+        with patch("services.app_access_permission_service.sessionmaker") as mock_sessionmaker:
+            result = AppAccessPermissionService.check_access_with_reason(
+                app=app, end_user=end_user, authenticated=False
+            )
+
+        assert result is AccessCheckResult.AUTH_REQUIRED
+        # The policy short-circuits before the allowlist lookups: there is no
+        # session to open, so the DB is never touched.
+        mock_sessionmaker.assert_not_called()
+
+    def test_authenticated_caller_with_anonymous_off_is_allowed(self):
+        # Default access is on and the visitor is signed in: nothing to check.
+        app = self._make_app(AppAccessPolicy.ALLOW_ALL.value, allow_anonymous=False)
+
+        with patch("services.app_access_permission_service.sessionmaker") as mock_sessionmaker:
+            result = AppAccessPermissionService.check_access_with_reason(
+                app=app, end_user=self._make_end_user(), authenticated=True
+            )
+
+        assert result is AccessCheckResult.ALLOWED
+        mock_sessionmaker.assert_not_called()
+
+    def test_allowlist_only_app_still_consults_the_allowlist_when_signed_in(self):
+        app = self._make_app(AppAccessPolicy.DENY_ALL_EXPLICIT.value, allow_anonymous=False)
+        end_user = self._make_end_user(session_id="workcode-1")
+
+        session = MagicMock()
+        session.scalar.return_value = MagicMock()  # active row found
+
+        with patch("services.app_access_permission_service.db"), patch(
+            "services.app_access_permission_service.sessionmaker",
+            return_value=_sessionmaker_mock(session),
+        ):
+            result = AppAccessPermissionService.check_access_with_reason(
+                app=app, end_user=end_user, authenticated=True
+            )
+
+        assert result is AccessCheckResult.ALLOWED
+
+    def _make_end_user(self, session_id: str = "user-123") -> MagicMock:
+        user = MagicMock()
+        user.session_id = session_id
+        user.external_user_id = session_id
+        return user
 
 
 class TestGrant:

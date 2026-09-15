@@ -9,7 +9,7 @@ import * as React from 'react'
 import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import Loading from '@/app/components/base/loading'
-import { usePermissionsAppList, useUpdateAppAccessPolicy } from '@/service/use-permissions'
+import { usePermissionsAppList, useUpdateAppAccessPolicy, useUpdateAppAllowAnonymous } from '@/service/use-permissions'
 import WhitelistModal from './whitelist-modal'
 
 type SelectedApp = {
@@ -21,6 +21,7 @@ const PermissionsTable = () => {
   const { t } = useTranslation()
   const { data, isPending, isError } = usePermissionsAppList()
   const { mutateAsync: updatePolicy } = useUpdateAppAccessPolicy()
+  const { mutateAsync: updateAllowAnonymous } = useUpdateAppAllowAnonymous()
 
   const apps = data?.data ?? []
   const [selectedApp, setSelectedApp] = useState<SelectedApp | null>(null)
@@ -35,11 +36,20 @@ const PermissionsTable = () => {
     }
   }, [t, updatePolicy])
 
+  const handleToggleAnonymous = useCallback(async (appId: string, current: boolean) => {
+    try {
+      await updateAllowAnonymous({ appId, allowAnonymous: !current })
+    }
+    catch {
+      toast.error(t('permissions.feedback.toggleAnonymousFailed', { ns: 'common' }))
+    }
+  }, [t, updateAllowAnonymous])
+
   const columns = useMemo(() => ([
     { key: 'name', label: t('permissions.columns.appName', { ns: 'common' }) },
     { key: 'appId', label: t('permissions.columns.appId', { ns: 'common' }) },
     { key: 'policy', label: t('permissions.columns.defaultAccess', { ns: 'common' }) },
-    { key: 'actions', label: t('permissions.columns.actions', { ns: 'common' }) },
+    { key: 'anonymous', label: t('permissions.columns.allowAnonymous', { ns: 'common' }) },
   ]), [t])
 
   if (isPending) {
@@ -81,6 +91,11 @@ const PermissionsTable = () => {
           <tbody>
             {apps.map(app => {
               const isAllowAll = app.access_policy === 'allow_all'
+              // Second level of the policy: anonymous access is only reachable
+              // while default access is on. Turning default access off makes
+              // every visitor sign in, so the switch is shown as off and
+              // disabled instead of pretending the stored value still applies.
+              const isAnonymousAllowed = isAllowAll && app.allow_anonymous
               return (
                 <tr
                   key={app.id}
@@ -100,26 +115,55 @@ const PermissionsTable = () => {
                     </Tooltip>
                   </td>
                   <td className="px-6 py-4">
-                    <div className="flex items-center gap-2">
-                      <Switch
-                        checked={isAllowAll}
-                        onCheckedChange={() => handleToggle(app.id, app.access_policy)}
-                      />
-                      <span className="system-sm-regular text-text-secondary">
-                        {isAllowAll
-                          ? t('permissions.defaultAccess.allowAll', { ns: 'common' })
-                          : t('permissions.defaultAccess.denyAllExplicit', { ns: 'common' })}
-                      </span>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          checked={isAllowAll}
+                          onCheckedChange={() => handleToggle(app.id, app.access_policy)}
+                        />
+                        <span className="system-sm-regular text-text-secondary">
+                          {isAllowAll
+                            ? t('permissions.defaultAccess.allowAll', { ns: 'common' })
+                            : t('permissions.defaultAccess.denyAllExplicit', { ns: 'common' })}
+                        </span>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="small"
+                        onClick={() => setSelectedApp({ id: app.id, name: app.name })}
+                      >
+                        {t('permissions.whitelist', { ns: 'common' })}
+                      </Button>
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-right">
-                    <Button
-                      variant="secondary"
-                      size="small"
-                      onClick={() => setSelectedApp({ id: app.id, name: app.name })}
-                    >
-                      {t('permissions.whitelist', { ns: 'common' })}
-                    </Button>
+                  <td className="px-6 py-4">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={isAnonymousAllowed}
+                        disabled={!isAllowAll}
+                        onCheckedChange={() => handleToggleAnonymous(app.id, app.allow_anonymous)}
+                      />
+                      {isAllowAll
+                        ? (
+                            <span className="system-sm-regular text-text-secondary">
+                              {isAnonymousAllowed
+                                ? t('permissions.allowAnonymous.allowed', { ns: 'common' })
+                                : t('permissions.allowAnonymous.required', { ns: 'common' })}
+                            </span>
+                          )
+                        : (
+                            <Tooltip>
+                              <TooltipTrigger
+                                render={<span className="cursor-help system-sm-regular text-text-tertiary" />}
+                              >
+                                {t('permissions.allowAnonymous.required', { ns: 'common' })}
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                {t('permissions.allowAnonymous.requiresDefaultAccess', { ns: 'common' })}
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
+                    </div>
                   </td>
                 </tr>
               )

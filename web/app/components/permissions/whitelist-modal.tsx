@@ -1,18 +1,20 @@
 'use client'
 
 import type { WhitelistEntry } from '@/models/app-permission'
+import { cn } from '@langgenius/dify-ui/cn'
 import { Button } from '@langgenius/dify-ui/button'
-import { Dialog, DialogContent } from '@langgenius/dify-ui/dialog'
+import { Dialog, DialogContent, DialogCloseButton } from '@langgenius/dify-ui/dialog'
 import { toast } from '@langgenius/dify-ui/toast'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@langgenius/dify-ui/tooltip'
+import { RiAddLine, RiDeleteBinLine } from '@remixicon/react'
 import * as React from 'react'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import Input from '@/app/components/base/input'
 import Loading from '@/app/components/base/loading'
 import {
   useGrantWhitelistUsers,
   useRevokeWhitelistUser,
-  useUpdateWhitelistExpiry,
   useWhitelist,
 } from '@/service/use-permissions'
 
@@ -35,12 +37,17 @@ const WhitelistModal = ({
   onClose,
 }: WhitelistModalProps) => {
   const { t } = useTranslation()
-  const { data, isPending } = useWhitelist(appId)
+  const { data, isPending, isError } = useWhitelist(appId)
   const entries: WhitelistEntry[] = data?.data ?? []
   const { mutateAsync: grant } = useGrantWhitelistUsers(appId)
   const { mutateAsync: revoke } = useRevokeWhitelistUser(appId)
-  const { mutateAsync: updateExpiry } = useUpdateWhitelistExpiry(appId)
 
+  useEffect(() => {
+    if (isError)
+      toast.error(t('permissions.feedback.loadWhitelistFailed', { ns: 'common' }))
+  }, [isError, t])
+
+  const [isAdding, setIsAdding] = useState(false)
   const [userIdsRaw, setUserIdsRaw] = useState('')
   const [expiresAt, setExpiresAt] = useState('')
   const [filter, setFilter] = useState('')
@@ -52,6 +59,18 @@ const WhitelistModal = ({
     const needle = filter.trim().toLowerCase()
     return entries.filter(entry => entry.user_id.toLowerCase().includes(needle))
   }, [entries, filter])
+
+  const openAddForm = useCallback(() => {
+    setUserIdsRaw('')
+    setExpiresAt('')
+    setIsAdding(true)
+  }, [])
+
+  const cancelAddForm = useCallback(() => {
+    setUserIdsRaw('')
+    setExpiresAt('')
+    setIsAdding(false)
+  }, [])
 
   const handleAdd = useCallback(async () => {
     const userIds = parseUserIds(userIdsRaw)
@@ -67,6 +86,7 @@ const WhitelistModal = ({
       })
       setUserIdsRaw('')
       setExpiresAt('')
+      setIsAdding(false)
       if (result.skipped.length > 0) {
         toast.warning(
           t('permissions.feedback.grantPartial', { ns: 'common', skipped: result.skipped.length }),
@@ -90,64 +110,71 @@ const WhitelistModal = ({
     }
   }, [revoke, t])
 
-  const handleUpdateExpiry = useCallback(async (permId: string, value: string) => {
-    try {
-      await updateExpiry({ permId, expiresAt: value || null })
-    }
-    catch {
-      toast.error(t('permissions.feedback.updateFailed', { ns: 'common' }))
-    }
-  }, [updateExpiry, t])
-
   return (
     <Dialog open onOpenChange={open => !open && onClose()}>
       <DialogContent className="w-[640px] max-w-none p-6">
-        <div className="mb-4 flex items-start justify-between gap-4 pr-8">
+        <div className="mb-4 flex items-center justify-between gap-4 pr-8">
           <h2 className="title-lg-semi-bold text-text-primary">
             {t('permissions.whitelistModal.title', { ns: 'common', appName })}
           </h2>
+          <Button variant="primary" size="small" onClick={openAddForm}>
+            <RiAddLine className="mr-1 h-4 w-4" aria-hidden="true" />
+            {t('permissions.whitelistModal.addUser', { ns: 'common' })}
+          </Button>
         </div>
 
-        <div className="mb-4 flex flex-col gap-2 rounded-lg bg-background-section p-4">
-          <div className="flex flex-col gap-1">
-            <label className="system-sm-medium text-text-secondary">
-              {t('permissions.whitelistModal.userId', { ns: 'common' })}
-            </label>
-            <Input
-              value={userIdsRaw}
-              onChange={e => setUserIdsRaw(e.target.value)}
-              placeholder={t('permissions.whitelistModal.userIdPlaceholder', { ns: 'common' })}
-            />
+        {isAdding && (
+          <div className="mb-4 flex flex-col gap-3 rounded-lg bg-background-section p-4">
+            <div className="flex flex-col gap-1">
+              <label
+                htmlFor="whitelist-user-id"
+                className="system-sm-medium text-text-secondary"
+              >
+                {t('permissions.whitelistModal.userId', { ns: 'common' })}
+              </label>
+              <Input
+                id="whitelist-user-id"
+                value={userIdsRaw}
+                onChange={e => setUserIdsRaw(e.target.value)}
+                placeholder={t('permissions.whitelistModal.userIdPlaceholder', { ns: 'common' })}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label
+                htmlFor="whitelist-expires-at"
+                className="system-sm-medium text-text-secondary"
+              >
+                {t('permissions.whitelistModal.expiresAt', { ns: 'common' })}
+              </label>
+              <Input
+                id="whitelist-expires-at"
+                type="date"
+                value={expiresAt}
+                onChange={e => setExpiresAt(e.target.value)}
+                placeholder={t('permissions.whitelistModal.expiresAtPlaceholder', { ns: 'common' })}
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="secondary" onClick={cancelAddForm} disabled={isSubmitting}>
+                {t('permissions.whitelistModal.cancel', { ns: 'common' })}
+              </Button>
+              <Button variant="primary" onClick={handleAdd} loading={isSubmitting} disabled={isSubmitting}>
+                {t('permissions.whitelistModal.save', { ns: 'common' })}
+              </Button>
+            </div>
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="system-sm-medium text-text-secondary">
-              {t('permissions.whitelistModal.expiresAt', { ns: 'common' })}
-            </label>
-            <Input
-              type="date"
-              value={expiresAt}
-              onChange={e => setExpiresAt(e.target.value)}
-              placeholder={t('permissions.whitelistModal.expiresAtPlaceholder', { ns: 'common' })}
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-1">
-            <Button variant="secondary" onClick={onClose} disabled={isSubmitting}>
-              {t('permissions.whitelistModal.cancel', { ns: 'common' })}
-            </Button>
-            <Button variant="primary" onClick={handleAdd} loading={isSubmitting} disabled={isSubmitting}>
-              {t('permissions.whitelistModal.save', { ns: 'common' })}
-            </Button>
-          </div>
-        </div>
+        )}
 
         <div className="mb-2 flex items-center gap-2">
           <Input
             value={filter}
             onChange={e => setFilter(e.target.value)}
             placeholder={t('permissions.whitelistModal.sessionIdFilterPlaceholder', { ns: 'common' })}
+            showClearIcon
+            onClear={() => setFilter('')}
             wrapperClassName="flex-1"
           />
-          <span className="system-xs-regular text-text-tertiary">
+          <span className="shrink-0 system-xs-regular text-text-tertiary">
             {t('permissions.whitelistModal.filterCount', {
               ns: 'common',
               shown: filteredEntries.length,
@@ -156,60 +183,89 @@ const WhitelistModal = ({
           </span>
         </div>
 
-        <div className="max-h-[280px] overflow-y-auto rounded-lg border border-divider-regular">
+        <div className="overflow-hidden rounded-lg border border-divider-regular">
           {isPending
             ? (
                 <div className="flex h-32 items-center justify-center">
                   <Loading type="area" />
                 </div>
               )
-            : filteredEntries.length === 0
-              ? (
-                  <div className="flex h-32 items-center justify-center system-sm-regular text-text-tertiary">
-                    {filter.trim()
-                      ? t('permissions.whitelistModal.filterEmpty', { ns: 'common' })
-                      : t('permissions.whitelistModal.empty', { ns: 'common' })}
-                  </div>
-                )
-              : (
-                  <ul className="divide-y divide-divider-subtle">
-                    {filteredEntries.map(entry => (
-                      <li
-                        key={entry.id}
-                        className="flex items-center gap-3 px-4 py-3"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate font-mono system-sm-regular text-text-primary">
-                            {entry.user_id}
-                          </div>
-                          <div className="system-xs-regular text-text-tertiary">
-                            {entry.expires_at
-                              ? `${t('permissions.whitelistModal.expiresAt', { ns: 'common' })}: ${entry.expires_at}`
-                              : t('permissions.whitelistModal.never', { ns: 'common' })}
-                          </div>
-                        </div>
-                        <Input
-                          type="date"
-                          value={entry.expires_at ?? ''}
-                          onChange={e => handleUpdateExpiry(entry.id, e.target.value)}
-                          wrapperClassName="w-[160px]"
-                        />
-                        <Button
-                          variant="tertiary"
-                          tone="destructive"
-                          size="small"
-                          onClick={() => {
-                            if (window.confirm(t('permissions.whitelistModal.confirmDelete', { ns: 'common' })))
-                              handleRevoke(entry.id)
-                          }}
-                        >
-                          {t('permissions.whitelistModal.delete', { ns: 'common' })}
-                        </Button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+            : (
+                <table className="w-full table-fixed">
+                  <thead>
+                    <tr className="border-b border-divider-regular bg-components-table-row-bg-hover">
+                      <th className="w-[40%] px-4 py-2 text-left system-xs-medium-uppercase text-text-tertiary">
+                        {t('permissions.whitelistModal.userId', { ns: 'common' })}
+                      </th>
+                      <th className="w-[40%] px-4 py-2 text-left system-xs-medium-uppercase text-text-tertiary">
+                        {t('permissions.whitelistModal.expiresAt', { ns: 'common' })}
+                      </th>
+                      <th className="w-[20%] px-4 py-2 text-right system-xs-medium-uppercase text-text-tertiary">
+                        {t('permissions.whitelistModal.actions', { ns: 'common' })}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredEntries.length === 0
+                      ? (
+                          <tr>
+                            <td
+                              colSpan={3}
+                              className="h-32 px-4 py-3 text-center system-sm-regular text-text-tertiary"
+                            >
+                              {filter.trim()
+                                ? t('permissions.whitelistModal.filterEmpty', { ns: 'common' })
+                                : t('permissions.whitelistModal.empty', { ns: 'common' })}
+                            </td>
+                          </tr>
+                        )
+                      : filteredEntries.map(entry => (
+                          <tr
+                            key={entry.id}
+                            className={cn(
+                              'border-b border-divider-subtle last:border-b-0',
+                              'hover:bg-state-base-hover',
+                            )}
+                          >
+                            <td className="px-4 py-3 font-mono system-sm-regular text-text-primary">
+                              {entry.user_id}
+                            </td>
+                            <td className="px-4 py-3 system-sm-regular text-text-secondary">
+                              {entry.expires_at
+                                ? entry.expires_at
+                                : t('permissions.whitelistModal.never', { ns: 'common' })}
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <Tooltip>
+                                <TooltipTrigger
+                                  render={(
+                                    <button
+                                      type="button"
+                                      aria-label={t('permissions.whitelistModal.delete', { ns: 'common' })}
+                                      className="inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-state-base-hover hover:text-text-secondary focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-components-input-border-hover"
+                                      onClick={() => {
+                                        if (window.confirm(t('permissions.whitelistModal.confirmDelete', { ns: 'common' })))
+                                          handleRevoke(entry.id)
+                                      }}
+                                    />
+                                  )}
+                                >
+                                  <RiDeleteBinLine className="h-4 w-4" aria-hidden="true" />
+                                </TooltipTrigger>
+                                <TooltipContent>{t('permissions.whitelistModal.delete', { ns: 'common' })}</TooltipContent>
+                              </Tooltip>
+                            </td>
+                          </tr>
+                        ))}
+                  </tbody>
+                </table>
+              )}
         </div>
+
+        <DialogCloseButton
+          onClick={onClose}
+          aria-label={t('permissions.whitelistModal.close', { ns: 'common' })}
+        />
       </DialogContent>
     </Dialog>
   )

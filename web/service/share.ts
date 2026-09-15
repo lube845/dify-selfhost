@@ -259,11 +259,22 @@ export const fetchAccessToken = async ({ userId, appCode }: { userId?: string, a
   return get<{ access_token: string }>(url, { headers }) as Promise<{ access_token: string }>
 }
 
+// `auth_required` — the app refuses anonymous visitors and this one is not
+// signed in. Not a permission problem: the visitor can self-recover by
+// signing in through /oa-login, which is why the share layout routes there
+// instead of to the "no permission" page.
+export type AccessCheckReason = 'allowed' | 'denied' | 'expired' | 'auth_required'
+
+export type AccessCheckResponse = {
+  result: boolean
+  reason: AccessCheckReason
+}
+
 export const getUserCanAccess = (appId: string, isInstalledApp: boolean, otherOptions?: IOtherOptions) => {
   if (isInstalledApp)
-    return consoleGet<{ result: boolean }>(`/enterprise/webapp/permission?appId=${appId}`, {}, otherOptions)
+    return consoleGet<AccessCheckResponse>(`/enterprise/webapp/permission?appId=${appId}`, {}, otherOptions)
 
-  return get<{ result: boolean }>(`/webapp/permission?appId=${appId}`, {}, otherOptions)
+  return get<AccessCheckResponse>(`/webapp/permission?appId=${appId}`, {}, otherOptions)
 }
 
 export const getAppAccessModeByAppCode = (appCode: string) => {

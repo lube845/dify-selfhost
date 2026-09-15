@@ -97,6 +97,21 @@ class ProviderNotSupportSpeechToTextError(BaseHTTPException):
     code = 400
 
 
+class WebAppLoginRequiredError(BaseHTTPException):
+    """Raised when an app refuses anonymous visitors and none is signed in.
+
+    Distinct from ``AppAccessPermissionDeniedError``: the visitor has not been
+    rejected by the allowlist — the app's owner simply turned anonymous access
+    off (``App.allow_anonymous is False``) or made the app allowlist-only. The
+    user can self-recover by signing in through ``/oa-login``, which is why the
+    frontend routes this code there instead of to the "no permission" page.
+    """
+
+    error_code = "web_app_login_required"
+    description = "This app requires you to sign in before chatting."
+    code = 401
+
+
 class WebAppAuthRequiredError(BaseHTTPException):
     error_code = "web_sso_auth_required"
     description = "Web app authentication required."

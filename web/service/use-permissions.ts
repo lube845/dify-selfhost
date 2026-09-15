@@ -7,6 +7,7 @@ import {
   grantWhitelistUsers,
   revokeWhitelistUser,
   updateAppAccessPolicy,
+  updateAppAllowAnonymous,
   updateWhitelistExpiry,
 } from './permissions'
 
@@ -28,6 +29,25 @@ export const useUpdateAppAccessPolicy = () => {
     mutationKey: consoleQuery.permissions.appUpdate.mutationKey(),
     mutationFn: ({ appId, accessPolicy }: { appId: string, accessPolicy: AppAccessPolicy }) =>
       updateAppAccessPolicy(appId, accessPolicy),
+    onSuccess: () => {
+      client.invalidateQueries({
+        queryKey: consoleQuery.permissions.apps.queryKey({ input: appsInput }),
+      })
+    },
+  })
+}
+
+/**
+ * Toggle whether anonymous (not signed in) visitors may chat on an app.
+ * Independent from {@link useUpdateAppAccessPolicy}: the backend accepts each
+ * field on its own so flipping one switch never rewrites the other.
+ */
+export const useUpdateAppAllowAnonymous = () => {
+  const client = useQueryClient()
+  return useMutation({
+    mutationKey: consoleQuery.permissions.appUpdate.mutationKey(),
+    mutationFn: ({ appId, allowAnonymous }: { appId: string, allowAnonymous: boolean }) =>
+      updateAppAllowAnonymous(appId, allowAnonymous),
     onSuccess: () => {
       client.invalidateQueries({
         queryKey: consoleQuery.permissions.apps.queryKey({ input: appsInput }),

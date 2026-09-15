@@ -5,13 +5,27 @@ import { Buffer } from 'node:buffer'
 import { NextResponse } from 'next/server'
 import { env } from '@/env'
 
-const OA_SESSION_COOKIE = 'oa_session'
 const NECESSARY_DOMAIN = '*.sentry.io http://localhost:* http://127.0.0.1:* https://analytics.google.com googletagmanager.com *.googletagmanager.com https://www.google-analytics.com https://ungh.cc https://api2.amplitude.com *.amplitude.com'
+
+// Routes that may legitimately be embedded in an iframe. Everything else
+// gets a DENY X-Frame-Options header to prevent clickjacking.
+const EMBEDDABLE_ROUTE_PREFIXES = [
+  '/chat',
+  '/workflow',
+  '/completion',
+  '/webapp-signin',
+  '/webapp-no-permission',
+  '/webapp-permission-expired',
+  '/oa-login',
+] as const
+
+const isEmbeddableRoute = (pathname: string) =>
+  EMBEDDABLE_ROUTE_PREFIXES.some(prefix => pathname.startsWith(prefix))
 
 const wrapResponseWithXFrameOptions = (response: NextResponse, pathname: string) => {
   // prevent clickjacking: https://owasp.org/www-community/attacks/Clickjacking
   // Chatbot page should be allowed to be embedded in iframe. It's a feature
-  if (env.NEXT_PUBLIC_ALLOW_EMBED !== true && !pathname.startsWith('/chat') && !pathname.startsWith('/workflow') && !pathname.startsWith('/completion') && !pathname.startsWith('/webapp-signin'))
+  if (env.NEXT_PUBLIC_ALLOW_EMBED !== true && !isEmbeddableRoute(pathname))
     response.headers.set('X-Frame-Options', 'DENY')
 
   return response
@@ -19,16 +33,25 @@ const wrapResponseWithXFrameOptions = (response: NextResponse, pathname: string)
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  // Gate /chat/* routes behind OA login. Full verification happens server-side
-  // at GET /api/oa/me; here we only redirect visitors without an oa_session
-  // cookie to the login page.
-  if (pathname.startsWith('/chat/') && !request.cookies.get(OA_SESSION_COOKIE)) {
-    const redirectUrl = pathname + request.nextUrl.search
-    const loginUrl = new URL('/oa-login', request.url)
-    loginUrl.searchParams.set('redirect_url', redirectUrl)
-    return NextResponse.redirect(loginUrl)
-  }
-
+  // `/chat/*` is deliberately NOT gated here any more. It used to redirect
+  // cookie-less visitors to `/oa-login` based on the mere presence of the
+  // `oa_session` cookie, but that blanket check cannot express the per-app
+  // access policy: apps may opt into anonymous access (App.allow_anonymous),
+  // and the edge middleware has no access to the app's config — it would also
+  // block the apps whose owner explicitly allows anonymous visitors.
+  //
+  // The gate now lives where the app config is available, i.e. server-side:
+  //   - GET  /api/passport          refuses to mint an anonymous passport for
+  //                                 an app that requires sign-in (passport.py)
+  //   - webapp API resources        reject anonymous callers (wraps.py)
+  //   - GET  /api/webapp/permission returns reason='auth_required' (app.py)
+  // and the client reacts to `web_app_login_required` / `auth_required` by
+  // routing to /oa-login with the current URL (web/service/base.ts and
+  // web/app/(shareLayout)/components/authenticated-layout.tsx).
+  //
+  // Defence in depth is unchanged: no app content is served before the
+  // passport is issued, because every webapp data endpoint is a
+  // WebApiResource that resolves the passport first.
   const requestHeaders = new Headers(request.headers)
 
   const isWhiteListEnabled = !!env.NEXT_PUBLIC_CSP_WHITELIST && process.env.NODE_ENV === 'production'
